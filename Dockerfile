@@ -14,6 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Répertoire de travail ──────────────────────────────────────────────────────
 WORKDIR /app
 
+# ── PyTorch CPU-only (~300MB vs ~2GB GPU) ────────────────────────────────────
+# DOIT être installé AVANT openai-whisper pour éviter la version GPU
+RUN pip install --no-cache-dir \
+    torch==2.1.0+cpu \
+    torchaudio==2.1.0+cpu \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+
 # ── Python deps ───────────────────────────────────────────────────────────────
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -22,7 +29,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir yt-dlp --upgrade
 
 # ── App ───────────────────────────────────────────────────────────────────────
-# Note: Whisper model téléchargé au premier usage (évite timeout Railway build)
 COPY . .
 
 # ── Répertoires de données ────────────────────────────────────────────────────
@@ -32,7 +38,7 @@ RUN mkdir -p /app/uploads /app/screenshots
 EXPOSE 8501
 
 # ── Healthcheck ───────────────────────────────────────────────────────────────
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
     CMD curl -f http://localhost:8501/_stcore/health || exit 1
 
 # ── Démarrage ─────────────────────────────────────────────────────────────────
