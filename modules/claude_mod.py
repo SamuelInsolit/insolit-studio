@@ -435,6 +435,47 @@ Rapport de patterns actionnable en français, format markdown:
         return f"Erreur : {e}", {}
 
 
+def compare_video_to_kb_resource(
+    video_hook_type: str,
+    video_hook_text: str,
+    video_score: float,
+    video_categorie: str,
+    resource: dict,
+) -> dict:
+    """
+    Compare une vidéo analysée à une ressource de la KB.
+    Retourne {"points_communs": [...], "differences": [...], "conseil_cle": "..."}
+    Utilise Haiku (rapide, ~$0.001).
+    """
+    perf_label = {"viral": "VIRAL (+500k vues)", "bon": "BON (50-500k vues)",
+                  "moyen": "MOYEN (<50k vues)"}.get(resource.get("performance_tag", ""), "performance inconnue")
+    vues_str = f"{resource.get('vues_approx', 0):,} vues" if resource.get("vues_approx") else "vues inconnues"
+
+    prompt = f"""Compare ces deux contenus vidéo en 1 phrase max par point. JSON strict uniquement.
+
+VIDÉO ANALYSÉE:
+- Catégorie: {video_categorie}
+- Hook type: {video_hook_type}
+- Hook texte: «{video_hook_text or "non disponible"}»
+- Score potentiel: {video_score}/10
+
+RESSOURCE BASE DE CONNAISSANCES [{perf_label} | {vues_str}]:
+- Titre: {resource.get("titre")}
+- Hook: «{resource.get("hook_texte") or "non renseigné"}»
+- Ce qui marche: {resource.get("ce_qui_marche") or "non renseigné"}
+- Script (extrait): {str(resource.get("contenu", ""))[:200]}
+
+{{"points_communs": ["similarité 1 (1 phrase max)", "similarité 2"], "differences": ["différence 1 (1 phrase max)", "différence 2"], "conseil_cle": "1 action concrète pour s'aligner sur la ressource performante"}}"""
+
+    try:
+        text, usage = _call_claude(prompt, max_tokens=300, model=MODEL_FAST, use_context=False)
+        result = _parse_json_response(text)
+        return result
+    except Exception as e:
+        logger.warning(f"Comparaison KB échouée: {e}")
+        return {"points_communs": [], "differences": [], "conseil_cle": ""}
+
+
 def _parse_pegasus_response(raw_text: str) -> dict:
     """Parse la réponse JSON Vision (même logique que l'ancien module twelvelabs)."""
     text = raw_text.strip()

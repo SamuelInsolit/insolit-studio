@@ -340,6 +340,124 @@ def get_all_videos_with_stats():
         session.close()
 
 
+def find_matching_kb_resources(hook_type: str = "", categorie: str = "",
+                               hook_texte: str = "", limit: int = 3) -> list:
+    """
+    Trouve les ressources de la base de connaissances dont les tags correspondent
+    au hook_type et à la catégorie de la vidéo analysée.
+    Retourne une liste de dicts enrichis avec overlap_tags et match_score.
+    """
+    import json as _json
+    session = get_session()
+    try:
+        resources = session.query(Ressource).all()
+        if not resources:
+            return []
+
+        # Termes de recherche extraits de la vidéo
+        search_terms = set()
+        if hook_type:
+            for part in hook_type.lower().replace("-", "_").split("_"):
+                if len(part) > 2:
+                    search_terms.add(part)
+        if categorie:
+            search_terms.add(categorie.lower())
+            # Synonymes courants
+            syns = {"restaurant": ["food", "resto", "restau"],
+                    "bar": ["cocktail", "drinks"],
+                    "café": ["coffee", "brunch"],
+                    "bon plan": ["deal", "promo", "prix"]}
+            for k, v in syns.items():
+                if k in categorie.lower():
+                    search_terms.update(v)
+        # Mots-clés du hook texte (5 premiers mots significatifs)
+        if hook_texte:
+            stop = {"le", "la", "les", "de", "du", "des", "un", "une", "et", "à", "en", "on"}
+            for word in hook_texte.lower().split():
+                w = word.strip("«».,!?")
+                if len(w) > 3 and w not in stop:
+                    search_terms.add(w)
+                if len(search_terms) >= 8:
+                    break
+
+        if not search_terms:
+            return []
+
+        scored = []
+        for r in resources:
+            r_tags = set()
+            if r.tags:
+                try:
+                    for t in _json.loads(r.tags):
+                        r_tags.add(t.lower().strip())
+                except Exception:
+                    pass
+            if r.type_ressource:
+                r_tags.add(r.type_ressource.lower())
+            if r.hook_texte:
+                # Les mots du hook de la ressource comptent aussi
+                stop = {"le", "la", "les", "de", "du", "un", "une", "et", "à", "en"}
+                for word in (r.hook_texte or "").lower().split():
+                    w = word.strip("«».,!?")
+                    if len(w) > 3 and w not in stop:
+                        r_tags.add(w)
+
+            overlap = search_terms & r_tags
+            if overlap:
+                scored.append({
+                    "id":                  r.id,
+                    "titre":               r.titre,
+                    "contenu":             r.contenu,
+                    "performance_tag":     r.performance_tag,
+                    "vues_approx":         r.vues_approx,
+                    "nb_likes":            getattr(r, "nb_likes", None),
+                    "nb_enregistrements":  getattr(r, "nb_enregistrements", None),
+                    "taux_completion":     getattr(r, "taux_completion", None),
+                    "hook_texte":          getattr(r, "hook_texte", None),
+                    "ce_qui_marche":       getattr(r, "ce_qui_marche", None),
+                    "a_reproduire":        getattr(r, "a_reproduire", None),
+                    "compte_source":       r.compte_source,
+                    "tags":                r.tags,
+                    "overlap_tags":        list(overlap),
+                    "match_score":         len(overlap),
+                })
+
+        return sorted(scored, key=lambda x: -x["match_score"])[:limit]
+    finally:
+        session.close()
+
+
+def get_scoring_referentiel() -> dict:
+    """
+    Calcule le référentiel de scores basé sur les vidéos annotées.
+    Retourne {'viral': avg, 'bon': avg, 'moyen': avg, 'nb_annotees': n}
+    """
+    session = get_session()
+    try:
+        from sqlalchemy.orm import joinedload
+        videos = (
+            session.query(Video)
+            .join(Stats, isouter=True)
+            .join(AnalyseCreative, isouter=True)
+            .filter(Video.statut_analyse == "complete")
+            .all()
+        )
+        buckets = {"viral": [], "bon": [], "moyen": [], "mauvais": []}
+        for v in videos:
+            if v.stats and v.stats.performance_tag and v.analyse_creative:
+                tag   = v.stats.performance_tag
+                score = v.analyse_creative.score_potentiel
+                if tag in buckets and score:
+                    buckets[tag].append(float(score))
+
+        result = {"nb_annotees": sum(len(v) for v in buckets.values())}
+        for tag, scores in buckets.items():
+            result[tag] = round(sum(scores) / len(scores), 1) if scores else None
+        return result
+    finally:
+        session.close()
+
+
 def delete_video(video_id: int) -> dict:
     """
     Supprime une vidéo et toutes ses données (DB + fichiers disque).

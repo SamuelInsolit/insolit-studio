@@ -216,6 +216,7 @@ if launch_analysis:
         st.stop()
 
     st.session_state["last_analysis"] = result
+    st.session_state["last_analysis_meta"] = metadata  # pour KB matching
     m, s = divmod(elapsed_total, 60)
     cout = result.get("cout_total", 0)
     st.success(
@@ -284,6 +285,172 @@ if "last_analysis" in st.session_state:
         with col_c:
             st.markdown("**💡 Recommandations**")
             for r in (recos[:3] if recos else ["—"]): st.markdown(f"- {r}")
+
+    # ── BLOC 1b — Scoring avec référentiel personnel ──────────────────────────
+    score_val = creative.get("score_potentiel")
+    if score_val:
+        from modules.database import get_scoring_referentiel
+        ref = get_scoring_referentiel()
+        nb_ann = ref.get("nb_annotees", 0)
+
+        if nb_ann >= 5:
+            # Déterminer où se situe la vidéo
+            viral_avg = ref.get("viral")
+            bon_avg   = ref.get("bon")
+            moyen_avg = ref.get("moyen")
+
+            position = ""
+            action   = ""
+            pos_color = "#888"
+            try:
+                sv = float(score_val)
+                if viral_avg and sv >= viral_avg:
+                    position = "Au niveau de tes vidéos **virales** 🔥"
+                    pos_color = "#ff00a4"
+                    action = "Déjà au top — optimise la distribution (heure de post, hashtags)"
+                elif bon_avg and sv >= bon_avg:
+                    position = "Entre **bonne** et **virale**"
+                    pos_color = "#01f0fc"
+                    action = creative.get("recommandations", ["Améliore le hook"])[0] if creative.get("recommandations") else "Renforce le hook"
+                elif moyen_avg and sv >= moyen_avg:
+                    position = "Entre **moyenne** et **bonne**"
+                    pos_color = "#f59e0b"
+                    action = creative.get("recommandations", ["Travaille le hook"])[0] if creative.get("recommandations") else "Travaille le hook"
+                else:
+                    position = "En dessous de tes vidéos **moyennes**"
+                    pos_color = "#ef4444"
+                    action = creative.get("recommandations", ["Refonte complète nécessaire"])[0] if creative.get("recommandations") else "Refonte complète"
+            except Exception:
+                pass
+
+            ref_lines = []
+            if viral_avg: ref_lines.append(f"🔥 Virales : <strong>{viral_avg}</strong> moy.")
+            if bon_avg:   ref_lines.append(f"✅ Bonnes : <strong>{bon_avg}</strong> moy.")
+            if moyen_avg: ref_lines.append(f"😐 Moyennes : <strong>{moyen_avg}</strong> moy.")
+
+            st.markdown(f"""
+            <div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:12px;
+                        padding:1rem 1.4rem;margin:1rem 0;">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+                    <div>
+                        <div style="font-size:0.8em;color:#888;margin-bottom:4px;">SCORE POTENTIEL</div>
+                        <div style="font-size:2.2em;font-weight:900;color:#ff00a4;">{score_val}/10</div>
+                        <div style="margin-top:6px;font-size:0.85em;color:{pos_color};">{position}</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:0.78em;color:#666;margin-bottom:6px;">RÉFÉRENTIEL INSOLIT ({nb_ann} vidéos)</div>
+                        {"".join(f'<div style="font-size:0.82em;color:#aaa;">{l}</div>' for l in ref_lines)}
+                    </div>
+                </div>
+                {f'<div style="margin-top:10px;padding-top:10px;border-top:1px solid #1a1a1a;font-size:0.85em;color:#01f0fc;">→ Pour passer à 8+ : <strong>{action}</strong></div>' if action else ''}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            needed = 5 - nb_ann
+            st.caption(f"📊 Référentiel insuffisant — annote **{needed} vidéo(s) de plus** dans Enrichir pour activer le scoring contextualisé.")
+
+    # ── BLOC 1c — Base de Connaissances — ressources similaires ───────────────
+    hook_type_val = hook.get("type_hook") or creative.get("hook_type", "")
+    hook_text_val = hook.get("texte_dit") or creative.get("hook_texte", "")
+    categorie_val = result.get("metadata_categorie", "") or ""  # récupéré via session_state si dispo
+
+    # Récupérer la catégorie depuis le résultat (stockée dans le titre ou les métadonnées)
+    # On utilise st.session_state pour passer la catégorie choisie lors de l'analyse
+    if "last_analysis_meta" in st.session_state:
+        categorie_val = st.session_state["last_analysis_meta"].get("categorie", "")
+
+    from modules.database import find_matching_kb_resources
+    with st.spinner("📚 Recherche dans ta base de connaissances..."):
+        kb_matches = find_matching_kb_resources(
+            hook_type=hook_type_val,
+            categorie=categorie_val,
+            hook_texte=hook_text_val,
+            limit=3,
+        )
+
+    if kb_matches:
+        st.markdown("### 📚 Ta Base de Connaissances dit...")
+
+        from modules.claude_mod import compare_video_to_kb_resource
+
+        for match in kb_matches:
+            perf = match.get("performance_tag", "")
+            vues = match.get("vues_approx")
+            vues_str = f"{vues:,} vues" if vues else "vues inconnues"
+
+            # Couleur et icône selon performance
+            if perf == "viral":
+                border_color = "#00cc66"
+                badge = "🔥 Ce format a déjà prouvé sa performance dans ta base"
+                badge_color = "#00cc66"
+                badge_bg    = "#001a0a"
+            elif perf in ("mauvais",):
+                border_color = "#f59e0b"
+                badge = "⚠️ Attention : un contenu similaire n'a pas performé"
+                badge_color = "#f59e0b"
+                badge_bg    = "#1a1000"
+            elif perf == "bon":
+                border_color = "#01f0fc"
+                badge = "✅ Format qui a bien performé dans ta base"
+                badge_color = "#01f0fc"
+                badge_bg    = "#001a1a"
+            else:
+                border_color = "#444"
+                badge = "📊 Contenu similaire dans ta base"
+                badge_color = "#888"
+                badge_bg    = "#0a0a0a"
+
+            # Comparaison Claude (Haiku, ~$0.001)
+            comparison = compare_video_to_kb_resource(
+                video_hook_type=hook_type_val,
+                video_hook_text=hook_text_val,
+                video_score=float(creative.get("score_potentiel") or 5),
+                video_categorie=categorie_val,
+                resource=match,
+            )
+            points_communs = comparison.get("points_communs", [])
+            differences    = comparison.get("differences", [])
+            conseil        = comparison.get("conseil_cle", "")
+
+            overlap_str = ", ".join(match.get("overlap_tags", [])[:4])
+
+            st.markdown(f"""
+            <div style="background:{badge_bg};border:1px solid {border_color};border-left:4px solid {border_color};
+                        border-radius:10px;padding:1rem 1.4rem;margin-bottom:0.8rem;">
+                <div style="color:{badge_color};font-size:0.8em;font-weight:700;margin-bottom:6px;">{badge}</div>
+                <div style="font-weight:700;font-size:0.95em;margin-bottom:4px;">
+                    «{match.get("titre")}»
+                    <span style="color:#666;font-size:0.8em;font-weight:400;"> · {vues_str}</span>
+                </div>
+                <div style="font-size:0.78em;color:#666;margin-bottom:10px;">
+                    Tags communs : {overlap_str}
+                </div>
+            """, unsafe_allow_html=True)
+
+            if points_communs or differences:
+                col_kb_a, col_kb_b = st.columns(2)
+                with col_kb_a:
+                    if points_communs:
+                        st.markdown("**Ce qui se ressemble :**")
+                        for pt in points_communs[:2]:
+                            st.markdown(f"<span style='color:#aaa;font-size:0.85em;'>↔ {pt}</span>", unsafe_allow_html=True)
+                with col_kb_b:
+                    if differences:
+                        st.markdown("**Ce qui diffère :**")
+                        for d in differences[:2]:
+                            st.markdown(f"<span style='color:#aaa;font-size:0.85em;'>≠ {d}</span>", unsafe_allow_html=True)
+
+            if conseil:
+                st.markdown(f"""
+                <div style="margin-top:8px;padding:6px 10px;background:#0d0d0d;border-radius:6px;
+                            font-size:0.83em;color:#01f0fc;">
+                    💡 <strong>Action :</strong> {conseil}
+                </div>""", unsafe_allow_html=True)
+
+            st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        # Pas de match = discret, pas intrusif
+        pass
 
     # ── BLOC 2 — Timeline des plans ───────────────────────────────────────────
     if plans:
