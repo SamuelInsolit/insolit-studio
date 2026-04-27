@@ -3,10 +3,7 @@ FROM python:3.11-slim
 # ── Dépendances système ────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
-    wget \
     curl \
-    git \
-    build-essential \
     libpq-dev \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -14,14 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ── Répertoire de travail ──────────────────────────────────────────────────────
 WORKDIR /app
 
-# ── PyTorch CPU-only (~300MB vs ~2GB GPU) ────────────────────────────────────
-# DOIT être installé AVANT openai-whisper pour éviter la version GPU
-RUN pip install --no-cache-dir \
-    torch==2.1.0+cpu \
-    torchaudio==2.1.0+cpu \
-    --extra-index-url https://download.pytorch.org/whl/cpu
-
-# ── Python deps ───────────────────────────────────────────────────────────────
+# ── Python deps (sans torch/whisper → image ~300MB au lieu de 1.5GB) ──────────
+# Sur Railway : transcription via OpenAI API Whisper (OPENAI_API_KEY requis)
+# En local    : pip install openai-whisper séparément si besoin
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -38,6 +30,5 @@ RUN mkdir -p /app/uploads /app/screenshots
 EXPOSE 8501
 
 # ── Démarrage ─────────────────────────────────────────────────────────────────
-# Note: Railway utilise son propre healthcheck (railway.toml) — pas besoin de HEALTHCHECK Docker
-# Le startCommand dans railway.toml utilise $PORT (assigné par Railway)
+# Railway utilise son propre healthcheck (railway.toml) + startCommand avec $PORT
 CMD ["sh", "-c", "python -m streamlit run app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false --browser.gatherUsageStats=false"]
