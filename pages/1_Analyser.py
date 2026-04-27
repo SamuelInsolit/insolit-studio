@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -73,29 +74,88 @@ if launch_analysis:
 
     # ─── Section C — Progression ──────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("#### Progression")
-    status_placeholder = st.empty()
-    progress_bar = st.progress(0)
-    steps_done = []
+
+    # Container principal de progression
+    progress_container = st.container()
+    with progress_container:
+        progress_bar = st.progress(0)
+        col_status, col_timer = st.columns([4, 1])
+        with col_status:
+            status_placeholder = st.empty()
+        with col_timer:
+            timer_placeholder = st.empty()
+
+    steps_container = st.empty()
 
     STEPS = [
-        ("⬇️ Récupération vidéo", 15),
-        ("🎬 Analyse des plans (Pegasus 1.1)", 35),
-        ("🔍 Recherche vidéos similaires (Marengo)", 50),
-        ("📝 Transcription (Whisper)", 70),
-        ("🧠 Analyse créative (Claude)", 88),
-        ("📸 Screenshots", 95),
-        ("✅ Finalisation", 100),
+        ("⬇️", "Récupération vidéo", 8),
+        ("🎬", "Analyse Pegasus + Transcription", 65),
+        ("🔍", "Similarités (Marengo)", 75),
+        ("🧠", "Analyse créative (Claude)", 90),
+        ("📸", "Screenshots", 97),
+        ("✅", "Finalisation", 100),
     ]
-    step_idx = [0]
 
-    def update_progress(msg):
-        for i, (label, pct) in enumerate(STEPS):
-            if any(key in msg for key in [label[:4], "⬇️", "🎬", "🔍", "📝", "🧠", "📸", "✅", "Terminé"]):
-                step_idx[0] = max(step_idx[0], i)
-                break
-        progress_bar.progress(min(STEPS[step_idx[0]][1], 99))
+    steps_state = ["pending"] * len(STEPS)
+    current_step_idx = [0]
+    start_ts = [time.time()]
+
+    import time as _time
+
+    def _render_steps():
+        lines = []
+        for i, (icon, label, pct) in enumerate(STEPS):
+            state = steps_state[i]
+            if state == "done":
+                lines.append(f"✅ ~~{label}~~")
+            elif state == "running":
+                lines.append(f"⏳ **{icon} {label}**")
+            else:
+                lines.append(f"⬜ {label}")
+        steps_container.markdown("  \n".join(lines))
+
+    def update_progress(msg: str):
+        # Déterminer l'étape courante selon le message
+        msg_low = msg.lower()
+        if any(k in msg_low for k in ["récupér", "télécharg", "initialisation", "upload"]):
+            idx = 0
+        elif any(k in msg_low for k in ["pegasus", "whisper", "transcri", "plan", "parallèle", "indexation", "analyse"]):
+            idx = 1
+        elif any(k in msg_low for k in ["marengo", "similaire", "embedding"]):
+            idx = 2
+        elif any(k in msg_low for k in ["claude", "créative", "créatif"]):
+            idx = 3
+        elif any(k in msg_low for k in ["screenshot", "frame", "capture"]):
+            idx = 4
+        elif any(k in msg_low for k in ["terminé", "finali", "✅"]):
+            idx = 5
+        else:
+            idx = current_step_idx[0]
+
+        # Marque les étapes précédentes comme done
+        for i in range(idx):
+            steps_state[i] = "done"
+        steps_state[idx] = "running"
+        current_step_idx[0] = idx
+
+        # Calcul du % de progression
+        target_pct = STEPS[idx][2]
+        prev_pct = STEPS[idx - 1][2] if idx > 0 else 0
+        pct = min(target_pct, max(prev_pct, target_pct - 5))
+        progress_bar.progress(pct)
+
+        # Status
         status_placeholder.markdown(f"**{msg}**")
+
+        # Timer
+        elapsed = int(_time.time() - start_ts[0])
+        m, s = divmod(elapsed, 60)
+        timer_placeholder.markdown(f"⏱️ **{m}:{s:02d}**")
+
+        # Steps visual
+        _render_steps()
+
+    _render_steps()
 
     from modules.analyzer import analyze_video
 
@@ -127,6 +187,14 @@ if launch_analysis:
             )
 
     progress_bar.progress(100)
+
+    # Mark all steps done
+    for i in range(len(STEPS)):
+        steps_state[i] = "done"
+    _render_steps()
+    elapsed_total = int(_time.time() - start_ts[0])
+    m, s = divmod(elapsed_total, 60)
+    timer_placeholder.markdown(f"⏱️ **{m}:{s:02d}** total")
 
     if not result.get("success"):
         st.error(f"Erreur lors de l'analyse : {result.get('error')}")

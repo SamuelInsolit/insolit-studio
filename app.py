@@ -98,6 +98,7 @@ with st.sidebar:
     st.page_link("pages/3_Patterns.py", label="📊 Patterns & Insights")
     st.page_link("pages/4_Generer.py", label="✨ Générer un brief")
     st.page_link("pages/5_Compte.py", label="🔭 Analyser un compte")
+    st.page_link("pages/6_Base_Connaissances.py", label="📖 Base de connaissances")
 
     st.divider()
     st.caption("Propulsé par TwelveLabs · Whisper · Claude")

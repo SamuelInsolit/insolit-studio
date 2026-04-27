@@ -109,12 +109,32 @@ def generate_brief(
     duree: int,
     ton: str,
     best_videos: list,
-    patterns: dict = None
+    patterns: dict = None,
+    knowledge_base: list = None,
 ) -> tuple[dict, dict]:
     """
     Génère un brief complet — utilise Sonnet (qualité maximale pour le livrable final).
+    knowledge_base: liste de ressources de la Base de Connaissances (scripts, patterns, guidelines).
     """
     best_str = json.dumps(best_videos[:4], ensure_ascii=False, indent=2) if best_videos else "[]"
+
+    # Enrichissement base de connaissances
+    kb_section = ""
+    if knowledge_base:
+        # Prioriser: guidelines > scripts viraux > patterns
+        guidelines = [r for r in knowledge_base if r.get("type_ressource") == "guideline"]
+        scripts = [r for r in knowledge_base if r.get("type_ressource") == "script" and r.get("performance_tag") == "viral"]
+        patterns_kb = [r for r in knowledge_base if r.get("type_ressource") == "pattern"]
+        top_kb = (guidelines + scripts + patterns_kb)[:6]  # max 6 ressources
+
+        if top_kb:
+            kb_lines = []
+            for r in top_kb:
+                type_lbl = {"script": "Script", "pattern": "Pattern", "guideline": "Guideline", "inspiration": "Inspiration"}.get(r.get("type_ressource", ""), "Ressource")
+                perf = f" [{r['performance_tag'].upper()}]" if r.get("performance_tag") else ""
+                vues = f" | {r['vues_approx']:,} vues" if r.get("vues_approx") else ""
+                kb_lines.append(f"[{type_lbl}{perf}{vues}] {r['titre']}:\n{r['contenu']}")
+            kb_section = f"\n\nBASE DE CONNAISSANCES INSOLIT (scripts/patterns validés):\n" + "\n---\n".join(kb_lines)
 
     prompt = f"""Brief de tournage TikTok/Reels pour Insolit (bons plans restaurants IDF).
 
@@ -124,10 +144,10 @@ CONTEXTE:
 - Objectif: {objectif} | Durée: {duree}s | Ton: {ton}
 
 VIDÉOS QUI ONT MARCHÉ:
-{best_str}
+{best_str}{kb_section}
 
 JSON strict (sans markdown):
-{{"hook_suggere":"texte exact","hook_justification":"basé sur quelle vidéo","script_complet":[{{"timestamp":"0-3s","texte_a_dire":"...","texte_ecran":"..."}}],"plans":[{{"numero":1,"timestamp":"0-3s","description_precise":"...","conseil_lumiere":"...","conseil_camera":"...","conseil_pratique":"...","difficulte":2,"pourquoi_ce_plan":"..."}}],"duree_totale_estimee":{duree},"temps_tournage_minutes":30,"temps_montage_minutes":45,"niveau_global":"Débutant|Intermédiaire|Avancé","meilleur_moment_publication":"Mardi 18h-20h","mots_cles_a_utiliser":["mot1","mot2"],"mots_a_eviter":["mot1"],"suggestions_bonus":["s1","s2"],"son_tendance_conseil":"conseil musique"}}"""
+{{"hook_suggere":"texte exact","hook_justification":"basé sur quelle vidéo ou ressource","script_complet":[{{"timestamp":"0-3s","texte_a_dire":"...","texte_ecran":"..."}}],"plans":[{{"numero":1,"timestamp":"0-3s","description_precise":"...","conseil_lumiere":"...","conseil_camera":"...","conseil_pratique":"...","difficulte":2,"pourquoi_ce_plan":"..."}}],"duree_totale_estimee":{duree},"temps_tournage_minutes":30,"temps_montage_minutes":45,"niveau_global":"Débutant|Intermédiaire|Avancé","meilleur_moment_publication":"Mardi 18h-20h","mots_cles_a_utiliser":["mot1","mot2"],"mots_a_eviter":["mot1"],"suggestions_bonus":["s1","s2"],"son_tendance_conseil":"conseil musique"}}"""
 
     try:
         text, usage = _call_claude(prompt, max_tokens=4096, model=MODEL_SMART)

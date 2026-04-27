@@ -205,6 +205,26 @@ class Brief(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Ressource(Base):
+    """
+    Base de connaissances : scripts, patterns, guidelines qui marchent.
+    Utilisée par Claude pour enrichir la génération de briefs.
+    """
+    __tablename__ = "ressources"
+
+    id = Column(Integer, primary_key=True)
+    type_ressource = Column(String(50))   # script|pattern|guideline|inspiration|competitor
+    titre = Column(String(500))
+    contenu = Column(Text)                # Le script/texte/pattern complet
+    tags = Column(Text)                   # JSON array de tags
+    compte_source = Column(String(200))   # @compte si applicable
+    vues_approx = Column(Integer)         # Vues approximatives
+    performance_tag = Column(String(50))  # viral|bon|moyen
+    notes = Column(Text)                  # Notes personnelles
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def get_precision_level():

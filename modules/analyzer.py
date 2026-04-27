@@ -244,10 +244,51 @@ def analyze_video(
         session.commit()
         step(f"⬇️ Vidéo récupérée ({duree:.0f}s)")
 
-        # ── Étape 2 : Pegasus 1.1 ─────────────────────────────────────────────
-        step("🎬 Analyse des plans (Pegasus)...")
-        pegasus_data = analyze_with_pegasus(video_path, step)
+        # ── Étapes 2+4 : Pegasus + Whisper en parallèle ──────────────────────
+        from concurrent.futures import ThreadPoolExecutor
 
+        step("🎬 Analyse Pegasus + 📝 Whisper en parallèle...")
+
+        _pegasus_result = [None]
+        _whisper_result = [None]
+        _pegasus_error = [None]
+        _whisper_error = [None]
+
+        def _run_pegasus():
+            try:
+                _pegasus_result[0] = analyze_with_pegasus(video_path, None)
+            except Exception as e:
+                _pegasus_error[0] = e
+
+        def _run_whisper():
+            try:
+                _whisper_result[0] = transcribe(video_path, None)
+            except Exception as e:
+                _whisper_error[0] = e
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            f_pegasus = executor.submit(_run_pegasus)
+            f_whisper = executor.submit(_run_whisper)
+            f_pegasus.result()  # wait
+            f_whisper.result()  # wait
+
+        if _pegasus_error[0]:
+            logger.error(f"Pegasus error: {_pegasus_error[0]}")
+            from modules.twelvelabs import _pegasus_fallback
+            pegasus_data = _pegasus_fallback(video_path)
+        else:
+            from modules.twelvelabs import _pegasus_fallback
+            pegasus_data = _pegasus_result[0] or _pegasus_fallback(video_path)
+
+        if _whisper_error[0]:
+            logger.error(f"Whisper error: {_whisper_error[0]}")
+            whisper_result = {"mots": [], "texte_complet": "", "nb_mots": 0, "debit_parole": 0, "silences": [], "langue": "fr"}
+        else:
+            whisper_result = _whisper_result[0] or {"mots": [], "texte_complet": "", "nb_mots": 0, "debit_parole": 0, "silences": [], "langue": "fr"}
+
+        step(f"🎬 {len(pegasus_data.get('plans', []))} plans | 📝 {whisper_result.get('nb_mots', 0)} mots")
+
+        # ── Sauvegarde Pegasus ────────────────────────────────────────────────
         plans_data = pegasus_data.get("plans", [])
         metriques = pegasus_data.get("metriques_globales", {})
         hook = pegasus_data.get("hook_analyse", {})
@@ -289,8 +330,17 @@ def analyze_video(
             )
             session.add(plan_obj)
 
+        # ── Sauvegarde Whisper ────────────────────────────────────────────────
+        for w in whisper_result.get("mots", []):
+            t = Transcription(
+                video_id=video_id,
+                timestamp=w["start"],
+                mot=w["mot"],
+                confiance=w["confiance"],
+            )
+            session.add(t)
+
         session.commit()
-        step(f"🎬 {len(plans_data)} plans détectés")
 
         # ── Étape 3 : Marengo embeddings ──────────────────────────────────────
         step("🔍 Recherche vidéos similaires (Marengo)...")
@@ -306,21 +356,6 @@ def analyze_video(
             step(f"🔍 {len(similar_videos)} vidéos similaires trouvées")
         else:
             step("🔍 Embedding non disponible")
-
-        # ── Étape 4 : Whisper ─────────────────────────────────────────────────
-        step("📝 Transcription (Whisper)...")
-        whisper_result = transcribe(video_path, step)
-
-        for w in whisper_result.get("mots", []):
-            t = Transcription(
-                video_id=video_id,
-                timestamp=w["start"],
-                mot=w["mot"],
-                confiance=w["confiance"],
-            )
-            session.add(t)
-        session.commit()
-        step(f"📝 {whisper_result.get('nb_mots', 0)} mots transcrits")
 
         # ── Étape 5 : Claude ──────────────────────────────────────────────────
         step("🧠 Analyse créative (Claude)...")

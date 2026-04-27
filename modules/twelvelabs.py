@@ -11,7 +11,14 @@ logger = logging.getLogger(__name__)
 TWELVELABS_API_KEY = os.getenv("TWELVELABS_API_KEY")
 INDEX_NAME = "insolit-studio"
 
-PEGASUS_PROMPT = """Analyse cette vidéo TikTok/Instagram et retourne UNIQUEMENT un JSON valide (sans markdown, sans explication) avec cette structure exacte :
+PEGASUS_PROMPT = """Analyse cette vidéo TikTok/Instagram et retourne UNIQUEMENT un JSON valide (sans markdown, sans explication) avec cette structure exacte.
+
+RÈGLES CRITIQUES POUR LA DÉTECTION DES PLANS :
+- Détecte CHAQUE changement de plan, même très court (minimum 0.3 seconde).
+- Chaque changement de plan = un nouveau objet dans la liste plans.
+- Si la vidéo dure 30s avec 10 coupes, tu retournes 10 plans minimum.
+- Ne regroupe JAMAIS plusieurs plans en un seul. Chaque coupe = un objet séparé.
+- Inspecte frame par frame pour ne manquer aucun cut, transition, fade ou zoom discret.
 
 {
   "plans": [
@@ -19,6 +26,7 @@ PEGASUS_PROMPT = """Analyse cette vidéo TikTok/Instagram et retourne UNIQUEMENT
       "timestamp_debut": 0.0,
       "timestamp_fin": 3.0,
       "type_plan": "macro_plat|plan_moyen|plan_large|visage|texte_ecran|qr_code|action|transition",
+      "scene_change_type": "cut|transition|fade|zoom|pan",
       "sujet_principal": "description courte",
       "luminosite": 7,
       "type_lumiere": "naturelle_chaude|naturelle_froide|artificielle|mixte",

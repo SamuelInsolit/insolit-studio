@@ -214,9 +214,25 @@ with col_result:
         }
 
         from modules.claude_mod import generate_brief as gen_brief
-        from modules.database import Brief
+        from modules.database import Brief, Ressource
 
-        with st.spinner("Claude génère ton brief..."):
+        # Charge la base de connaissances
+        kb_session = get_session()
+        knowledge_base = []
+        try:
+            kb_items = kb_session.query(Ressource).order_by(Ressource.created_at.desc()).all()
+            for r in kb_items:
+                knowledge_base.append({
+                    "type_ressource": r.type_ressource,
+                    "titre": r.titre,
+                    "contenu": r.contenu,
+                    "performance_tag": r.performance_tag,
+                    "vues_approx": r.vues_approx,
+                })
+        finally:
+            kb_session.close()
+
+        with st.spinner(f"Claude génère ton brief{'  (+ ' + str(len(knowledge_base)) + ' ressources KB)' if knowledge_base else ''}..."):
             brief_data, usage = gen_brief(
                 type_contenu=type_contenu,
                 partenaire=partenaire,
@@ -227,6 +243,7 @@ with col_result:
                 ton=ton,
                 best_videos=best_for_claude,
                 patterns=patterns,
+                knowledge_base=knowledge_base if knowledge_base else None,
             )
 
         if "_error" in brief_data:
