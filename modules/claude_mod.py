@@ -185,15 +185,17 @@ def analyze_frames_with_vision(
         "type": "text",
         "text": (
             f"Vidéo TikTok/Instagram de {video_duration:.0f} secondes. "
-            f"Voici {len(frames)} frames extraites, une par plan détecté.\n"
-            "Analyse chaque frame et déduis la structure créative complète.\n\n"
-            "RÈGLES CRITIQUES :\n"
-            "1. TEXTE : Lis TOUT le texte visible à l'écran (overlay, sous-titres, prix, adresses, emojis) — "
-            "copie-le mot pour mot dans 'texte_visible_ecran'. Si aucun texte → null.\n"
-            "2. PLANS : Chaque frame = un plan distinct. Ne fusionne jamais deux plans.\n"
-            "3. HOOK : Les 3 premières secondes sont le hook — analyse finement le texte ET l'image.\n"
-            "4. PRIX : Si un prix est visible (ex: 6,99€ / 12€), note-le exactement dans texte_visible_ecran.\n"
-            f"IMPORTANT: chaque frame correspond à un plan entre les timestamps indiqués."
+            f"Voici {len(frames)} frames extraites à intervalles réguliers.\n"
+            "OBJECTIF : Détecter TOUS les plans et analyser la structure créative complète.\n\n"
+            "RÈGLES ABSOLUES :\n"
+            f"1. PLANS : Chaque frame = UN plan distinct dans le JSON. NE JAMAIS fusionner deux frames.\n"
+            f"   → Tu dois retourner exactement {len(frames)} objets dans 'plans'.\n"
+            "2. TEXTE : Copie MOT POUR MOT tout texte visible (overlay, sous-titres, prix, adresses, emojis hashtags).\n"
+            "   → Si prix visible (ex: 6,99€ / 12€ / -50%) → note dans texte_visible_ecran OBLIGATOIREMENT.\n"
+            "   → Si aucun texte → null (pas une string vide).\n"
+            "3. HOOK : Les 3 premières secondes sont critiques — analyse finement le texte ET l'image du plan 1.\n"
+            "4. TIMESTAMPS : Utilise exactement les timestamps fournis (ne les invente pas).\n"
+            "5. structure_narrative dans metriques doit être UNE STRING (pas un objet JSON)."
         )
     })
 
@@ -220,8 +222,9 @@ def analyze_frames_with_vision(
     })
 
     try:
-        # ~300 tokens output par frame + 600 overhead (structure compacte)
-        max_tok = min(3000, max(1500, len(frames) * 300 + 600))
+        # ~250 tokens output par frame + 600 overhead (structure compacte)
+        # 12 frames → ~3600 tokens → on monte le plafond à 4096
+        max_tok = min(4096, max(2000, len(frames) * 250 + 600))
         response = client.messages.create(
             model=MODEL_FAST,
             max_tokens=max_tok,
@@ -276,14 +279,20 @@ def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: lis
             for s in similar_videos[:3]
         )
 
-    prompt = f"""Expert TikTok food IDF. Analyse en JSON strict (sans markdown).
+    prompt = f"""Expert TikTok food IDF. Réponds UNIQUEMENT avec ce JSON valide (sans markdown, sans texte avant/après).
 
 HOOK: {hook.get('texte_dit','')} | {hook.get('type_hook','')} | score:{hook.get('score_accroche',5)}
-PLANS: {json.dumps(plans_summary, ensure_ascii=False)}
+PLANS ({len(plans_summary)} plans): {json.dumps(plans_summary, ensure_ascii=False)}
 TRANSCRIPT: {texte}
 MOTS: {whisper_data.get('nb_mots',0)} | DÉBIT: {whisper_data.get('debit_parole',0)} mots/s
 
-{{"hook_texte":"texte","hook_visuel":"desc","hook_type":"question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour","hook_score":7.5,"hook_analyse":"1-2 phrases","structure_narrative":"desc","points_forts":["p1","p2","p3"],"points_faibles":["f1","f2"],"score_potentiel":7.0,"score_justification":"court","recommandations":["r1","r2","r3"],"comparaison_base":"court","adaptable_insolit":true,"script_adapte":"script Insolit","plans_a_reproduire":["plan1"],"note_adaptation":"note"}}"""
+TYPES OBLIGATOIRES (respecte exactement) :
+- hook_texte, hook_visuel, hook_type, hook_analyse, structure_narrative, comparaison_base, note_adaptation → STRING (jamais un objet)
+- points_forts, points_faibles, recommandations, plans_a_reproduire → ARRAY de strings
+- hook_score, score_potentiel → NUMBER
+- adaptable_insolit → BOOLEAN
+
+{{"hook_texte":"texte exact dit","hook_visuel":"description visuelle du hook","hook_type":"question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour","hook_score":7.5,"hook_analyse":"analyse en 1-2 phrases","structure_narrative":"description de la structure en string","points_forts":["point1","point2","point3"],"points_faibles":["faiblesse1","faiblesse2"],"score_potentiel":7.0,"score_justification":"justification courte","recommandations":["reco1","reco2","reco3"],"comparaison_base":"comparaison courte","adaptable_insolit":true,"script_adapte":"script adapté Insolit","plans_a_reproduire":["plan1"],"note_adaptation":"note"}}"""
 
     try:
         text, usage = _call_claude(prompt, max_tokens=2000, model=MODEL_FAST)
@@ -429,14 +438,42 @@ def _parse_json_response(text: str) -> dict:
         t = t.split("```json")[1].split("```")[0].strip()
     elif "```" in t:
         t = t.split("```")[1].split("```")[0].strip()
+    parsed = None
     try:
-        return json.loads(t)
+        parsed = json.loads(t)
     except json.JSONDecodeError:
         start = t.find("{")
         end = t.rfind("}") + 1
         if start >= 0 and end > start:
             try:
-                return json.loads(t[start:end])
+                parsed = json.loads(t[start:end])
             except json.JSONDecodeError:
                 pass
-    return {"_raw": text, "_error": "JSON non parsable"}
+    if parsed is None:
+        return {"_raw": text, "_error": "JSON non parsable"}
+
+    # Normalisation des types pour éviter les erreurs SQLite "type dict/list not supported"
+    STRING_FIELDS = ["hook_texte", "hook_visuel", "hook_type", "hook_analyse",
+                     "structure_narrative", "comparaison_base", "note_adaptation",
+                     "script_adapte", "score_justification"]
+    LIST_FIELDS   = ["points_forts", "points_faibles", "recommandations", "plans_a_reproduire"]
+    for f in STRING_FIELDS:
+        if f in parsed and not isinstance(parsed[f], str):
+            # dict {"analyse": "..."} → extrait la string ou json.dumps
+            val = parsed[f]
+            if isinstance(val, dict):
+                parsed[f] = val.get("analyse") or val.get("description") or val.get("texte") or json.dumps(val, ensure_ascii=False)
+            else:
+                parsed[f] = str(val) if val is not None else ""
+    for f in LIST_FIELDS:
+        if f in parsed and not isinstance(parsed[f], list):
+            val = parsed[f]
+            if isinstance(val, str):
+                try:
+                    parsed[f] = json.loads(val)
+                except Exception:
+                    parsed[f] = [val] if val else []
+            else:
+                parsed[f] = []
+
+    return parsed

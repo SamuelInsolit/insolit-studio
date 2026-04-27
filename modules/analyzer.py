@@ -156,37 +156,40 @@ def compress_video(video_path: str, progress_callback=None) -> str:
 
 def detect_scene_changes(video_path: str, duration: float) -> list:
     """
-    Sampling uniforme de la vidéo — rapide (~0s), pas de décodage complet.
-    Claude Vision détermine les vrais changements de plans depuis les frames.
+    Sampling uniforme dense — rapide (~0s), pas de décodage complet.
+    Claude Vision analyse chaque frame et détecte les vrais changements de plans.
 
     Pourquoi pas le filtre ffmpeg scene ?
     → Décoder chaque frame HEVC (iPhone .mov) prend 1-2x la durée vidéo sur CPU.
     → Le sampling uniforme + Vision donne le même résultat en 10x moins de temps.
 
-    Nombre de frames adapté à la durée :
-    - ≤ 15s : 1 frame/1.5s (max 10)
-    - 15-30s : 1 frame/2.5s (max 12)
-    - 30-60s : 1 frame/4s   (max 15)
-    - > 60s  : 1 frame/6s   (max 15)
+    Nombre de frames adapté à la durée (dense pour détecter tous les plans) :
+    - ≤ 10s  : 1 frame/~0.8s  → max 12 frames
+    - 10-20s : 1 frame/~1.2s  → max 15 frames
+    - 20-30s : 1 frame/~2s    → max 15 frames
+    - 30-60s : 1 frame/~3s    → max 15 frames
+    - > 60s  : 1 frame/~5s    → max 15 frames
     """
-    if duration <= 15:
-        n_frames = min(7, max(4, int(duration / 2)))
+    if duration <= 10:
+        n_frames = min(12, max(6, int(duration * 1.2)))
+    elif duration <= 20:
+        n_frames = min(15, max(10, int(duration / 1.2)))
     elif duration <= 30:
-        n_frames = min(7, max(5, int(duration / 4)))
+        n_frames = min(15, max(12, int(duration / 2)))
     elif duration <= 60:
-        n_frames = min(7, max(6, int(duration / 8)))
+        n_frames = min(15, max(12, int(duration / 3)))
     else:
-        n_frames = 7  # Toujours 7 max pour contrôler le coût/vitesse
+        n_frames = min(15, max(12, int(duration / 5)))
 
     step = duration / (n_frames + 1)
     timestamps = [0.0] + [round((i + 1) * step, 2) for i in range(n_frames)] + [round(duration, 2)]
     timestamps = sorted(set(timestamps))
 
-    logger.info(f"Sampling uniforme: {len(timestamps)-1} intervalles pour {duration:.0f}s")
+    logger.info(f"Sampling dense: {len(timestamps)-1} intervalles pour {duration:.0f}s")
     return timestamps
 
 
-MAX_FRAMES_VISION = 7    # Max frames envoyées à Claude Vision — optimal vitesse/qualité
+MAX_FRAMES_VISION = 12   # Max frames envoyées à Claude Vision — 12 = bon équilibre plans/vitesse
 
 
 def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
@@ -401,36 +404,38 @@ def analyze_video(
             video_id=video_id,
             raw_json=json.dumps(pegasus_data, ensure_ascii=False),
             nb_plans=len(plans_data),
-            duree_moyenne_plan=duree / max(len(plans_data), 1),
-            rythme_coupes_par_seconde=float(metriques.get("rythme_coupes_par_seconde", 0)),
-            luminosite_moyenne=float(metriques.get("luminosite_moyenne", 5)),
+            duree_moyenne_plan=round(duree / max(len(plans_data), 1), 2),
+            rythme_coupes_par_seconde=float(metriques.get("rythme_coupes_par_seconde") or 0),
+            luminosite_moyenne=float(metriques.get("luminosite_moyenne") or 5),
             presence_visage=_pct_to_bool(metriques.get("presence_visage_pourcentage", "0%")),
             presence_texte_ecran=_pct_to_bool(metriques.get("proportion_texte_ecran", "0%")),
-            qualite_production=float(metriques.get("qualite_globale", 5)),
-            type_tournage=metriques.get("type_tournage", ""),
+            qualite_production=float(metriques.get("qualite_globale") or 5),
+            type_tournage=_to_str(metriques.get("type_tournage", "")),
             mouvement_dominant="",
         )
         session.add(ap)
 
         for i, p in enumerate(plans_data):
+            t_debut = float(p.get("timestamp_debut") or 0)
+            t_fin   = float(p.get("timestamp_fin") or duree)
             plan_obj = Plan(
                 video_id=video_id,
                 numero_plan=i + 1,
-                timestamp_debut=float(p.get("timestamp_debut", 0)),
-                timestamp_fin=float(p.get("timestamp_fin", duree)),
-                duree=float(p.get("timestamp_fin", duree)) - float(p.get("timestamp_debut", 0)),
-                type_plan=p.get("type_plan", ""),
-                description=p.get("sujet_principal", ""),
-                luminosite=float(p.get("luminosite", 5)),
-                mouvement=p.get("mouvement_camera", ""),
+                timestamp_debut=t_debut,
+                timestamp_fin=t_fin,
+                duree=round(t_fin - t_debut, 2),
+                type_plan=_to_str(p.get("type_plan", "")),
+                description=_to_str(p.get("sujet_principal", "")),
+                luminosite=float(p.get("luminosite") or 5),
+                mouvement=_to_str(p.get("mouvement_camera", "")),
                 presence_visage=bool(p.get("presence_visage", False)),
-                expression=p.get("expression_visage", ""),
-                texte_visible=p.get("texte_visible_ecran"),
-                couleur_dominante=json.dumps(p.get("couleurs_dominantes", []), ensure_ascii=False),
-                qualite=float(p.get("qualite_production", 5)),
-                role_narratif=p.get("role_narratif", ""),
-                points_forts=json.dumps(p.get("points_forts", []), ensure_ascii=False),
-                suggestion_amelioration=p.get("suggestion_amelioration", ""),
+                expression=_to_str(p.get("expression_visage", "")),
+                texte_visible=_to_str(p.get("texte_visible_ecran")) or None,
+                couleur_dominante=_to_str(p.get("couleurs_dominantes", [])),
+                qualite=float(p.get("qualite_production") or 5),
+                role_narratif=_to_str(p.get("role_narratif", "")),
+                points_forts=_to_str(p.get("points_forts", [])),
+                suggestion_amelioration=_to_str(p.get("suggestion_amelioration", "")),
             )
             session.add(plan_obj)
 
@@ -456,19 +461,19 @@ def analyze_video(
 
         ac = AnalyseCreative(
             video_id=video_id,
-            hook_texte=creative_data.get("hook_texte", hook.get("texte_dit", "")),
-            hook_visuel=creative_data.get("hook_visuel", ""),
-            hook_type=creative_data.get("hook_type", hook.get("type_hook", "")),
-            hook_score=float(creative_data.get("hook_score", hook.get("score_accroche", 5))),
-            hook_analyse=creative_data.get("hook_analyse", ""),
-            structure_narrative=creative_data.get("structure_narrative", ""),
-            points_forts=json.dumps(creative_data.get("points_forts", []), ensure_ascii=False),
-            points_faibles=json.dumps(creative_data.get("points_faibles", []), ensure_ascii=False),
-            score_potentiel=float(creative_data.get("score_potentiel", 5)),
-            recommandations=json.dumps(creative_data.get("recommandations", []), ensure_ascii=False),
-            comparaison_base=creative_data.get("comparaison_base", ""),
+            hook_texte=_to_str(creative_data.get("hook_texte", hook.get("texte_dit", ""))),
+            hook_visuel=_to_str(creative_data.get("hook_visuel", "")),
+            hook_type=_to_str(creative_data.get("hook_type", hook.get("type_hook", ""))),
+            hook_score=float(creative_data.get("hook_score") or hook.get("score_accroche") or 5),
+            hook_analyse=_to_str(creative_data.get("hook_analyse", "")),
+            structure_narrative=_to_str(creative_data.get("structure_narrative", "")),
+            points_forts=_to_str(creative_data.get("points_forts", [])),
+            points_faibles=_to_str(creative_data.get("points_faibles", [])),
+            score_potentiel=float(creative_data.get("score_potentiel") or 5),
+            recommandations=_to_str(creative_data.get("recommandations", [])),
+            comparaison_base=_to_str(creative_data.get("comparaison_base", "")),
             adaptable_insolit=bool(creative_data.get("adaptable_insolit", True)),
-            note_adaptation=creative_data.get("note_adaptation", ""),
+            note_adaptation=_to_str(creative_data.get("note_adaptation", "")),
         )
         session.add(ac)
 
@@ -516,6 +521,21 @@ def analyze_video(
 # ─────────────────────────────────────────────────────────────────────────────
 # UTILITAIRES
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _to_str(val) -> str:
+    """Convertit n'importe quelle valeur en string sûre pour une colonne Text SQLite.
+    Evite le bug 'type dict/list is not supported' lors des INSERTs.
+    - dict / list → JSON string
+    - None        → ""
+    - str         → inchangé
+    - autre       → str(val)
+    """
+    if val is None:
+        return ""
+    if isinstance(val, (dict, list)):
+        return json.dumps(val, ensure_ascii=False)
+    return str(val)
+
 
 def _vision_fallback(duration: float) -> dict:
     n = max(3, int(duration / 5))
