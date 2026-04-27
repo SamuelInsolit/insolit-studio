@@ -39,9 +39,13 @@ def _get_model():
     global _whisper_model
     if _whisper_model is None:
         import whisper
-        logger.info("Chargement modèle Whisper medium...")
-        _whisper_model = whisper.load_model("medium")
-        logger.info("Modèle Whisper chargé.")
+        # Sur Railway (mémoire limitée) → small (~500MB RAM)
+        # En local → medium (~1.5GB RAM, meilleure précision)
+        IS_RAILWAY = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        model_size = "small" if IS_RAILWAY else "medium"
+        logger.info(f"Chargement modèle Whisper {model_size}...")
+        _whisper_model = whisper.load_model(model_size)
+        logger.info(f"Modèle Whisper {model_size} chargé.")
     return _whisper_model
 
 
