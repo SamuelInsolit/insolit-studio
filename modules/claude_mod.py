@@ -286,7 +286,7 @@ MOTS: {whisper_data.get('nb_mots',0)} | DÉBIT: {whisper_data.get('debit_parole'
 {{"hook_texte":"texte","hook_visuel":"desc","hook_type":"question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour","hook_score":7.5,"hook_analyse":"1-2 phrases","structure_narrative":"desc","points_forts":["p1","p2","p3"],"points_faibles":["f1","f2"],"score_potentiel":7.0,"score_justification":"court","recommandations":["r1","r2","r3"],"comparaison_base":"court","adaptable_insolit":true,"script_adapte":"script Insolit","plans_a_reproduire":["plan1"],"note_adaptation":"note"}}"""
 
     try:
-        text, usage = _call_claude(prompt, max_tokens=1200, model=MODEL_FAST)
+        text, usage = _call_claude(prompt, max_tokens=2000, model=MODEL_FAST)
         parsed = _parse_json_response(text)
         logger.info(f"Analyse créative (Haiku): coût={usage['cout_estime']}$ | {usage['input_tokens']}in/{usage['output_tokens']}out")
         return parsed, usage
