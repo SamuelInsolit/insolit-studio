@@ -1,6 +1,11 @@
 import os
+import sys
 import logging
 from dotenv import load_dotenv
+
+# Diagnostic startup log — flush immédiat pour Railway
+print("[STARTUP] app.py chargé, Python OK", flush=True)
+sys.stdout.flush()
 
 load_dotenv()
 

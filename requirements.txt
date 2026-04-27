@@ -11,6 +11,5 @@ openpyxl
 plotly
 python-dotenv
 numpy
-scikit-learn
 requests
 certifi
