@@ -1,0 +1,326 @@
+import os
+import json
+import logging
+from datetime import datetime
+from modules._env import _ROOT  # noqa — charge .env
+
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, Text,
+    DateTime, Boolean, ForeignKey, JSON
+)
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
+from sqlalchemy.pool import StaticPool
+
+
+logger = logging.getLogger(__name__)
+
+Base = declarative_base()
+_engine = None
+_SessionLocal = None
+
+
+def get_engine():
+    global _engine
+    if _engine is None:
+        db_url = os.getenv("DATABASE_URL", "sqlite:///insolit_studio.db")
+        if db_url.startswith("sqlite"):
+            _engine = create_engine(
+                db_url,
+                connect_args={"check_same_thread": False},
+                poolclass=StaticPool,
+            )
+        else:
+            _engine = create_engine(db_url, pool_pre_ping=True)
+    return _engine
+
+
+def get_session() -> Session:
+    global _SessionLocal
+    if _SessionLocal is None:
+        _SessionLocal = sessionmaker(bind=get_engine())
+    return _SessionLocal()
+
+
+def init_db():
+    Base.metadata.create_all(bind=get_engine())
+    logger.info("Base de données initialisée.")
+
+
+# ─── Modèles ────────────────────────────────────────────────────────────────
+
+class Video(Base):
+    __tablename__ = "videos"
+
+    id = Column(Integer, primary_key=True)
+    titre = Column(String(500))
+    url_source = Column(Text)
+    type_source = Column(String(50))  # mon_compte|concurrent|inspiration|secteur
+    nom_compte = Column(String(200))
+    date_publication = Column(String(50))
+    categorie = Column(String(100))
+    partenaire = Column(String(200))
+    ville = Column(String(100))
+    fichier_path = Column(Text)
+    duree_secondes = Column(Float)
+    statut_analyse = Column(String(50), default="en_attente")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    analyse_pegasus = relationship("AnalysePegasus", back_populates="video", uselist=False)
+    plans = relationship("Plan", back_populates="video")
+    transcription = relationship("Transcription", back_populates="video")
+    analyse_creative = relationship("AnalyseCreative", back_populates="video", uselist=False)
+    stats = relationship("Stats", back_populates="video", uselist=False)
+
+
+class AnalysePegasus(Base):
+    __tablename__ = "analyse_pegasus"
+
+    id = Column(Integer, primary_key=True)
+    video_id = Column(Integer, ForeignKey("videos.id"), unique=True)
+    raw_json = Column(Text)
+    nb_plans = Column(Integer)
+    duree_moyenne_plan = Column(Float)
+    rythme_coupes_par_seconde = Column(Float)
+    luminosite_moyenne = Column(Float)
+    presence_visage = Column(Boolean)
+    presence_texte_ecran = Column(Boolean)
+    qualite_production = Column(Float)
+    type_tournage = Column(String(50))
+    mouvement_dominant = Column(String(50))
+    marengo_embedding = Column(Text)  # JSON serialized list
+
+    video = relationship("Video", back_populates="analyse_pegasus")
+
+    def get_embedding(self):
+        if self.marengo_embedding:
+            return json.loads(self.marengo_embedding)
+        return None
+
+    def set_embedding(self, vector):
+        self.marengo_embedding = json.dumps(vector)
+
+
+class Plan(Base):
+    __tablename__ = "plans"
+
+    id = Column(Integer, primary_key=True)
+    video_id = Column(Integer, ForeignKey("videos.id"))
+    numero_plan = Column(Integer)
+    timestamp_debut = Column(Float)
+    timestamp_fin = Column(Float)
+    duree = Column(Float)
+    screenshot_path = Column(Text)
+    type_plan = Column(String(100))
+    description = Column(Text)
+    luminosite = Column(Float)
+    mouvement = Column(String(100))
+    presence_visage = Column(Boolean)
+    expression = Column(String(100))
+    texte_visible = Column(Text)
+    couleur_dominante = Column(String(200))
+    qualite = Column(Float)
+    role_narratif = Column(String(100))
+    points_forts = Column(Text)
+    suggestion_amelioration = Column(Text)
+
+    video = relationship("Video", back_populates="plans")
+
+
+class Transcription(Base):
+    __tablename__ = "transcription"
+
+    id = Column(Integer, primary_key=True)
+    video_id = Column(Integer, ForeignKey("videos.id"))
+    timestamp = Column(Float)
+    mot = Column(String(200))
+    confiance = Column(Float)
+
+    video = relationship("Video", back_populates="transcription")
+
+
+class AnalyseCreative(Base):
+    __tablename__ = "analyse_creative"
+
+    id = Column(Integer, primary_key=True)
+    video_id = Column(Integer, ForeignKey("videos.id"), unique=True)
+    hook_texte = Column(Text)
+    hook_visuel = Column(Text)
+    hook_type = Column(String(100))
+    hook_score = Column(Float)
+    hook_analyse = Column(Text)
+    structure_narrative = Column(Text)
+    points_forts = Column(Text)
+    points_faibles = Column(Text)
+    score_potentiel = Column(Float)
+    recommandations = Column(Text)
+    comparaison_base = Column(Text)
+    adaptable_insolit = Column(Boolean)
+    note_adaptation = Column(Text)
+
+    video = relationship("Video", back_populates="analyse_creative")
+
+
+class Stats(Base):
+    __tablename__ = "stats"
+
+    id = Column(Integer, primary_key=True)
+    video_id = Column(Integer, ForeignKey("videos.id"), unique=True)
+    vues = Column(Integer)
+    likes = Column(Integer)
+    comments = Column(Integer)
+    shares = Column(Integer)
+    saves = Column(Integer)
+    completion_rate = Column(Float)
+    clics_lien = Column(Integer)
+    performance_tag = Column(String(50))  # viral|bon|moyen|mauvais
+    note_humaine = Column(Text)
+    annotee_par = Column(String(100))
+    annotee_le = Column(DateTime)
+
+    video = relationship("Video", back_populates="stats")
+
+
+class Brief(Base):
+    __tablename__ = "briefs"
+
+    id = Column(Integer, primary_key=True)
+    type_contenu = Column(String(100))
+    partenaire = Column(String(200))
+    ville = Column(String(100))
+    offre = Column(Text)
+    objectif = Column(Text)
+    duree_cible = Column(Integer)
+    ton = Column(String(100))
+    hook_suggere = Column(Text)
+    script_complet = Column(Text)
+    plans_json = Column(Text)
+    niveau_difficulte = Column(String(50))
+    temps_tournage_estime = Column(Integer)
+    temps_montage_estime = Column(Integer)
+    suggestions = Column(Text)
+    base_sur_videos_ids = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def get_precision_level():
+    session = get_session()
+    try:
+        count = session.query(Stats).filter(Stats.performance_tag.isnot(None)).count()
+        if count < 10:
+            return count, "FAIBLE"
+        elif count < 30:
+            return count, "BONNE"
+        else:
+            return count, "EXCELLENTE"
+    finally:
+        session.close()
+
+
+def get_all_videos_with_stats():
+    session = get_session()
+    try:
+        videos = (
+            session.query(Video)
+            .filter(Video.statut_analyse == "complete")
+            .order_by(Video.created_at.desc())
+            .all()
+        )
+        result = []
+        for v in videos:
+            d = {
+                "id": v.id,
+                "titre": v.titre,
+                "url_source": v.url_source,
+                "type_source": v.type_source,
+                "nom_compte": v.nom_compte,
+                "categorie": v.categorie,
+                "partenaire": v.partenaire,
+                "ville": v.ville,
+                "fichier_path": v.fichier_path,
+                "duree_secondes": v.duree_secondes,
+                "created_at": v.created_at,
+            }
+            if v.analyse_pegasus:
+                d.update({
+                    "nb_plans": v.analyse_pegasus.nb_plans,
+                    "rythme_coupes_par_seconde": v.analyse_pegasus.rythme_coupes_par_seconde,
+                    "qualite_production": v.analyse_pegasus.qualite_production,
+                })
+            if v.analyse_creative:
+                d.update({
+                    "hook_score": v.analyse_creative.hook_score,
+                    "score_potentiel": v.analyse_creative.score_potentiel,
+                    "hook_texte": v.analyse_creative.hook_texte,
+                })
+            if v.stats:
+                d.update({
+                    "vues": v.stats.vues,
+                    "performance_tag": v.stats.performance_tag,
+                    "completion_rate": v.stats.completion_rate,
+                })
+            result.append(d)
+        return result
+    finally:
+        session.close()
+
+
+def delete_video(video_id: int) -> dict:
+    """
+    Supprime une vidéo et toutes ses données (DB + fichiers disque).
+    Retourne {"success": True/False, "message": "..."}
+    """
+    import shutil
+    session = get_session()
+    try:
+        video = session.query(Video).filter_by(id=video_id).first()
+        if not video:
+            return {"success": False, "message": f"Vidéo #{video_id} introuvable"}
+
+        fichier_path = video.fichier_path
+
+        # Suppression en cascade (tables liées)
+        session.query(Stats).filter_by(video_id=video_id).delete()
+        session.query(AnalyseCreative).filter_by(video_id=video_id).delete()
+        session.query(Transcription).filter_by(video_id=video_id).delete()
+        session.query(Plan).filter_by(video_id=video_id).delete()
+        session.query(AnalysePegasus).filter_by(video_id=video_id).delete()
+        session.delete(video)
+        session.commit()
+
+        # Fichier vidéo
+        if fichier_path and os.path.exists(fichier_path):
+            os.remove(fichier_path)
+
+        # Screenshots
+        screenshots_dir = os.path.join("./screenshots", str(video_id))
+        if os.path.exists(screenshots_dir):
+            shutil.rmtree(screenshots_dir)
+
+        logger.info(f"Vidéo #{video_id} supprimée")
+        return {"success": True, "message": f"Vidéo #{video_id} supprimée"}
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Erreur suppression vidéo #{video_id}: {e}")
+        return {"success": False, "message": str(e)}
+    finally:
+        session.close()
+
+
+def get_best_videos(source_filter="all", limit=10):
+    session = get_session()
+    try:
+        q = (
+            session.query(Video)
+            .join(Stats, isouter=True)
+            .filter(Video.statut_analyse == "complete")
+        )
+        if source_filter == "mon_compte":
+            q = q.filter(Video.type_source == "mon_compte")
+        elif source_filter == "concurrent":
+            q = q.filter(Video.type_source == "concurrent")
+        q = q.order_by(Stats.vues.desc().nullslast()).limit(limit)
+        return q.all()
+    finally:
+        session.close()

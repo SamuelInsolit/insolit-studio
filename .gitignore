@@ -1,0 +1,44 @@
+# Secrets
+.env
+*.env
+
+# Base de données locale
+*.db
+*.sqlite3
+
+# Vidéos & screenshots (trop lourds pour git)
+uploads/
+screenshots/
+*.mp4
+*.mov
+*.MOV
+*.avi
+*.mkv
+*.webm
+*.wav
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+app.log
+streamlit.log
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.vscode/
+.idea/
+*.swp

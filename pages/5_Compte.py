@@ -1,0 +1,624 @@
+import json
+import os
+import time
+import subprocess
+import logging
+import streamlit as st
+from dotenv import load_dotenv
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+st.set_page_config(page_title="Analyser un compte — Insolit Studio", page_icon="🔭", layout="wide")
+
+from modules.styles import apply_styles
+apply_styles()
+
+st.markdown("""
+<style>
+.fiche-compte { background:#0a0a0a; border:1px solid #ff00a4; border-radius:16px; padding:1.5rem; }
+</style>
+""", unsafe_allow_html=True)
+
+from modules.analyzer import YTDLP_BIN, FFMPEG_BIN, FFPROBE_BIN, _ensure_dirs, VOLUME_PATH, SCREENSHOTS_PATH
+from modules.database import get_session, get_all_videos_with_stats, get_precision_level
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _clean_username(raw: str) -> str:
+    raw = raw.strip().lstrip("@")
+    for prefix in ["https://www.tiktok.com/@", "https://tiktok.com/@",
+                   "https://www.instagram.com/", "https://instagram.com/"]:
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+    return raw.split("?")[0].strip("/")
+
+
+def get_account_videos(username: str, platform: str, nb_videos: int, progress_cb=None) -> list:
+    """Récupère la liste des vidéos d'un compte via yt-dlp --flat-playlist."""
+    if platform == "TikTok":
+        url = f"https://www.tiktok.com/@{username}"
+    else:
+        url = f"https://www.instagram.com/{username}/"
+
+    if progress_cb:
+        progress_cb(f"📋 Récupération des {nb_videos} dernières vidéos de @{username}...")
+
+    cmd = [
+        YTDLP_BIN,
+        "--cookies-from-browser", "chrome",
+        "--flat-playlist",
+        "--playlist-end", str(nb_videos),
+        "--print", "%(id)s\t%(title)s\t%(url)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(duration)s\t%(upload_date)s",
+        "--no-warnings",
+        url
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            err = result.stderr.lower()
+            if "private" in err or "login" in err:
+                raise RuntimeError("Compte privé — impossible d'analyser ce compte.")
+            if "not found" in err or "404" in err:
+                raise RuntimeError(f"Compte @{username} introuvable.")
+            logger.warning(f"yt-dlp stderr: {result.stderr[-300:]}")
+
+        videos = []
+        for line in result.stdout.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                def safe_int(v):
+                    try: return int(v)
+                    except: return None
+                def safe_float(v):
+                    try: return float(v)
+                    except: return None
+
+                videos.append({
+                    "id": parts[0] if len(parts) > 0 else "",
+                    "titre": parts[1] if len(parts) > 1 else "",
+                    "url": parts[2] if len(parts) > 2 else "",
+                    "vues": safe_int(parts[3]) if len(parts) > 3 else None,
+                    "likes": safe_int(parts[4]) if len(parts) > 4 else None,
+                    "comments": safe_int(parts[5]) if len(parts) > 5 else None,
+                    "duree": safe_float(parts[6]) if len(parts) > 6 else None,
+                    "date": parts[7] if len(parts) > 7 else "",
+                })
+
+        logger.info(f"Compte @{username}: {len(videos)} vidéos récupérées")
+        return videos
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Timeout récupération compte (120s). Réessaie.")
+    except FileNotFoundError:
+        raise RuntimeError(f"yt-dlp introuvable: {YTDLP_BIN}")
+
+
+def generate_account_report(username: str, platform: str, analyses: list) -> tuple[dict, dict]:
+    """Génère le rapport de compte via Claude."""
+    from modules.claude_mod import _call_claude
+
+    data_str = json.dumps(analyses, ensure_ascii=False, indent=2)
+    prompt = f"""Tu analyses le compte @{username} sur {platform} pour Insolit (bons plans restaurants IDF).
+
+DONNÉES DES {len(analyses)} VIDÉOS ANALYSÉES :
+{data_str}
+
+Génère un rapport JSON complet (sans markdown) :
+
+{{
+  "resume_compte": {{
+    "style_visuel_dominant": "description",
+    "ton_editorial": "description",
+    "frequence_publication": "estimation",
+    "points_forts_compte": ["point1", "point2", "point3"],
+    "points_faibles_compte": ["point1", "point2"]
+  }},
+  "meilleures_videos": [
+    {{
+      "titre": "titre ou description",
+      "pourquoi_ca_marche": "explication précise",
+      "elements_reproductibles": ["élément1", "élément2"]
+    }}
+  ],
+  "pires_videos": [
+    {{
+      "titre": "titre ou description",
+      "pourquoi_ca_pas_marche": "explication",
+      "erreurs_a_eviter": ["erreur1"]
+    }}
+  ],
+  "patterns_gagnants": [
+    {{
+      "pattern": "description du pattern",
+      "frequence": "X sur Y vidéos",
+      "impact_estime": "description"
+    }}
+  ],
+  "hooks_qui_marchent": [
+    {{
+      "texte": "texte du hook",
+      "score": 8,
+      "pourquoi": "explication"
+    }}
+  ],
+  "opportunites_insolit": [
+    "comment s'inspirer concrètement pour Insolit"
+  ],
+  "score_compte_global": 7,
+  "verdict": "Analyse directe en 3 phrases sur ce compte et son utilité pour Insolit."
+}}"""
+
+    try:
+        text, usage = _call_claude(prompt, max_tokens=4096)
+        from modules.claude_mod import _parse_json_response
+        return _parse_json_response(text), usage
+    except Exception as e:
+        logger.error(f"Erreur rapport compte: {e}")
+        return {"_error": str(e)}, {}
+
+
+# ─── UI ───────────────────────────────────────────────────────────────────────
+
+st.markdown("""
+<div style="padding:1.5rem 0 0.5rem 0;">
+    <h1 style="font-size:2rem;font-weight:900;color:#ff00a4;margin:0;">🔭 Analyser un compte</h1>
+    <p style="color:#555;margin-top:0.3rem;">Analyse automatique complète de tous les contenus d'un compte TikTok ou Instagram</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ─── Section A — Input ────────────────────────────────────────────────────────
+with st.container():
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        compte_input = st.text_input(
+            "@nomducompte ou URL du profil",
+            placeholder="@strop.bon ou https://www.tiktok.com/@strop.bon",
+            key="compte_input"
+        )
+    with col2:
+        plateforme = st.radio("Plateforme", ["TikTok", "Instagram"], horizontal=True, key="plateforme")
+
+    col3, col4 = st.columns([1, 1])
+    with col3:
+        nb_videos = st.select_slider(
+            "Nombre de vidéos à analyser",
+            options=[5, 10, 20, 50],
+            value=10,
+            key="nb_videos"
+        )
+    with col4:
+        type_compte = st.selectbox(
+            "Type de compte",
+            ["Concurrent", "Inspiration", "Secteur", "Mon compte"],
+            key="type_compte"
+        )
+
+    col5, col6 = st.columns([1, 1])
+    with col5:
+        categorie = st.selectbox(
+            "Catégorie",
+            ["Restaurant", "Bar", "Café", "Expérience", "Bon plan", "Tendance food", "Lifestyle", "Voyage IDF", "Autre"],
+            key="categorie_compte"
+        )
+    with col6:
+        st.markdown("<br>", unsafe_allow_html=True)
+
+launch_btn = st.button("🚀 LANCER L'ANALYSE DU COMPTE", use_container_width=True, type="primary")
+
+# ─── Pipeline ─────────────────────────────────────────────────────────────────
+if launch_btn:
+    if not compte_input.strip():
+        st.error("Entre un nom de compte ou une URL.")
+        st.stop()
+
+    username = _clean_username(compte_input)
+    type_map = {"Mon compte": "mon_compte", "Concurrent": "concurrent",
+                "Inspiration": "inspiration", "Secteur": "secteur"}
+    type_source = type_map.get(type_compte, "concurrent")
+
+    st.markdown("---")
+    st.markdown(f"### Analyse de **@{username}** sur {plateforme}")
+
+    progress_global = st.progress(0)
+    status_global = st.empty()
+
+    # ── Étape 1 : Récupération de la playlist ─────────────────────────────────
+    try:
+        videos_list = get_account_videos(
+            username, plateforme, nb_videos,
+            progress_cb=lambda msg: status_global.markdown(f"**{msg}**")
+        )
+    except RuntimeError as e:
+        st.error(str(e))
+        st.stop()
+
+    if not videos_list:
+        st.error(f"Aucune vidéo trouvée pour @{username}. Vérifie le nom du compte.")
+        st.stop()
+
+    nb_found = len(videos_list)
+    status_global.success(f"📋 {nb_found} vidéos trouvées sur @{username}")
+    progress_global.progress(5)
+
+    # ── Étape 2 : Analyse de chaque vidéo ────────────────────────────────────
+    from modules.analyzer import analyze_video
+
+    analyses_results = []
+    errors = []
+    start_time = time.time()
+
+    progress_container = st.empty()
+    video_status = st.empty()
+
+    for i, vid in enumerate(videos_list):
+        pct = 5 + int((i / nb_found) * 85)
+        progress_global.progress(pct)
+
+        elapsed = time.time() - start_time
+        reste = (elapsed / max(i, 1)) * (nb_found - i) if i > 0 else 0
+        reste_min = int(reste // 60)
+        reste_sec = int(reste % 60)
+
+        progress_container.markdown(f"""
+        <div class="card card-cyan">
+            <strong>Analyse en cours : {i+1}/{nb_found} vidéos</strong><br>
+            <div style="background:#111;border-radius:4px;height:6px;margin:8px 0;">
+                <div style="background:linear-gradient(90deg,#0000ff,#01f0fc,#ff00a4);width:{int((i/nb_found)*100)}%;height:6px;border-radius:4px;"></div>
+            </div>
+            Temps restant estimé : ~{reste_min}min {reste_sec}s
+        </div>
+        """, unsafe_allow_html=True)
+
+        url_video = vid.get("url", "")
+        if not url_video:
+            errors.append(f"Vidéo {i+1}: URL manquante")
+            continue
+
+        video_status.markdown(f"⬇️ Vidéo {i+1}/{nb_found} : {vid.get('titre', '')[:60]}...")
+
+        metadata = {
+            "type_source": type_source,
+            "nom_compte": username,
+            "categorie": categorie,
+            "partenaire": "",
+            "ville": "",
+        }
+
+        try:
+            result = analyze_video(
+                source=url_video,
+                metadata=metadata,
+                is_url=True,
+            )
+            if result.get("success"):
+                # Enrichit avec les stats yt-dlp
+                from modules.database import get_session, Stats
+                if vid.get("vues") or vid.get("likes"):
+                    sess = get_session()
+                    try:
+                        stats = Stats(
+                            video_id=result["video_id"],
+                            vues=vid.get("vues"),
+                            likes=vid.get("likes"),
+                            comments=vid.get("comments"),
+                        )
+                        if vid.get("vues"):
+                            vues = vid["vues"]
+                            if vues >= 500_000:
+                                stats.performance_tag = "viral"
+                            elif vues >= 50_000:
+                                stats.performance_tag = "bon"
+                            elif vues >= 10_000:
+                                stats.performance_tag = "moyen"
+                            else:
+                                stats.performance_tag = "mauvais"
+                        sess.add(stats)
+                        sess.commit()
+                    finally:
+                        sess.close()
+
+                analyses_results.append({
+                    "video_id": result.get("video_id"),
+                    "titre": result.get("titre"),
+                    "url": url_video,
+                    "vues": vid.get("vues"),
+                    "likes": vid.get("likes"),
+                    "duree": vid.get("duree"),
+                    "cout": result.get("cout_total", 0),
+                    "pegasus": result.get("pegasus_data", {}),
+                    "whisper_texte": result.get("whisper_data", {}).get("texte_complet", ""),
+                    "creative": result.get("creative_data", {}),
+                    "nb_plans": result.get("plans_count", 0),
+                    "score_potentiel": result.get("creative_data", {}).get("score_potentiel"),
+                    "hook_texte": result.get("creative_data", {}).get("hook_texte"),
+                    "hook_score": result.get("creative_data", {}).get("hook_score"),
+                })
+            else:
+                errors.append(f"Vidéo {i+1}: {result.get('error', 'Erreur inconnue')}")
+                logger.warning(f"Vidéo {i+1} échouée: {result.get('error')}")
+        except Exception as e:
+            errors.append(f"Vidéo {i+1}: {str(e)}")
+            logger.error(f"Vidéo {i+1} exception: {e}", exc_info=True)
+
+        # Rate limit entre chaque vidéo
+        if i < nb_found - 1:
+            time.sleep(3)
+
+    progress_global.progress(90)
+    video_status.empty()
+
+    total_cout = sum(r.get("cout", 0) for r in analyses_results)
+    elapsed_total = int(time.time() - start_time)
+
+    if not analyses_results:
+        st.error("Aucune vidéo n'a pu être analysée.")
+        if errors:
+            with st.expander("Erreurs"):
+                for e in errors:
+                    st.text(e)
+        st.stop()
+
+    # ── Étape 3 : Rapport Claude ──────────────────────────────────────────────
+    status_global.markdown("**🧠 Génération du rapport de compte (Claude)...**")
+
+    analyses_for_claude = [
+        {
+            "titre": r["titre"],
+            "vues": r["vues"],
+            "likes": r["likes"],
+            "duree": r["duree"],
+            "nb_plans": r["nb_plans"],
+            "score_potentiel": r["score_potentiel"],
+            "hook_texte": r["hook_texte"],
+            "hook_score": r["hook_score"],
+            "transcription": r["whisper_texte"][:300] if r["whisper_texte"] else "",
+            "hook_analyse": r.get("pegasus", {}).get("hook_analyse", {}),
+            "metriques": r.get("pegasus", {}).get("metriques_globales", {}),
+        }
+        for r in analyses_results
+    ]
+
+    rapport, claude_usage = generate_account_report(username, plateforme, analyses_for_claude)
+    total_cout += claude_usage.get("cout_estime", 0)
+
+    progress_global.progress(100)
+    status_global.success(
+        f"✅ {len(analyses_results)}/{nb_found} vidéos analysées | "
+        f"Coût total : ~${total_cout:.3f} | Durée : {elapsed_total//60}min {elapsed_total%60}s"
+    )
+    if errors:
+        with st.expander(f"⚠️ {len(errors)} erreurs"):
+            for e in errors:
+                st.text(e)
+
+    # Sauvegarde en session
+    st.session_state["last_compte_analysis"] = {
+        "username": username,
+        "plateforme": plateforme,
+        "analyses": analyses_results,
+        "rapport": rapport,
+        "total_cout": total_cout,
+        "elapsed": elapsed_total,
+    }
+
+# ─── Section B — Résultats ────────────────────────────────────────────────────
+if "last_compte_analysis" in st.session_state:
+    data = st.session_state["last_compte_analysis"]
+    username = data["username"]
+    plateforme = data["plateforme"]
+    rapport = data.get("rapport", {})
+    analyses = data.get("analyses", [])
+    resume = rapport.get("resume_compte", {})
+
+    st.markdown("---")
+
+    # ── BLOC 1 — Fiche compte ─────────────────────────────────────────────────
+    score = rapport.get("score_compte_global", "—")
+    score_bar = int(float(score) * 10) if isinstance(score, (int, float)) else 50
+
+    pf = resume.get("points_forts_compte", [])
+    ppf = resume.get("points_faibles_compte", [])
+    opps = rapport.get("opportunites_insolit", [])
+
+    st.markdown(f"""
+    <div class="fiche-compte">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
+            <div>
+                <span style="font-size:1.4rem;font-weight:900;color:#ff00a4;">@{username}</span>
+                <span style="color:#555;margin-left:8px;">{plateforme}</span>
+            </div>
+            <div style="text-align:right;">
+                <div style="font-size:0.85rem;color:#888;">{len(analyses)} vidéos analysées</div>
+                <div style="font-size:1.1rem;font-weight:700;color:#01f0fc;">Score global : {score}/10</div>
+                <div style="background:#111;border-radius:4px;height:6px;width:150px;margin-top:4px;">
+                    <div style="background:linear-gradient(90deg,#0000ff,#ff00a4);width:{score_bar}%;height:6px;border-radius:4px;"></div>
+                </div>
+            </div>
+        </div>
+        <div style="margin-top:1rem;display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;">
+            <div>
+                <div style="font-size:0.7rem;color:#555;text-transform:uppercase;letter-spacing:1px;">Style</div>
+                <div style="color:#01f0fc;font-size:0.9rem;">{resume.get("style_visuel_dominant","—")}</div>
+                <div style="font-size:0.7rem;color:#555;margin-top:8px;text-transform:uppercase;letter-spacing:1px;">Ton</div>
+                <div style="color:#01f0fc;font-size:0.9rem;">{resume.get("ton_editorial","—")}</div>
+            </div>
+            <div>
+                <div style="font-size:0.75rem;color:#888;margin-bottom:4px;">✅ Points forts</div>
+                {"".join(f'<div style="font-size:0.85rem;margin-bottom:3px;">• {p}</div>' for p in pf[:3])}
+            </div>
+            <div>
+                <div style="font-size:0.75rem;color:#888;margin-bottom:4px;">⚠️ Points faibles</div>
+                {"".join(f'<div style="font-size:0.85rem;margin-bottom:3px;">• {p}</div>' for p in ppf[:2])}
+                <div style="font-size:0.75rem;color:#888;margin-top:8px;margin-bottom:4px;">💡 Pour Insolit</div>
+                {"".join(f'<div style="font-size:0.85rem;margin-bottom:3px;">• {o}</div>' for o in opps[:2])}
+            </div>
+        </div>
+        <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid #1a1a1a;color:#aaa;font-style:italic;font-size:0.9rem;">
+            {rapport.get("verdict","—")}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── BLOC 2 — Top vidéos ───────────────────────────────────────────────────
+    meilleures = rapport.get("meilleures_videos", [])
+    if meilleures:
+        st.markdown("### 🏆 Top vidéos du compte")
+        cols = st.columns(min(3, len(meilleures)))
+        for i, v in enumerate(meilleures[:3]):
+            with cols[i]:
+                # Screenshot si dispo
+                if i < len(analyses):
+                    vid_id = analyses[i].get("video_id", "")
+                    shot = os.path.join(SCREENSHOTS_PATH, str(vid_id), "plan_01.jpg")
+                    if os.path.exists(shot):
+                        st.image(shot, use_container_width=True)
+                st.markdown(f"""
+                <div class="card card-pink">
+                    <div style="font-weight:700;font-size:0.9rem;color:#ff00a4;">#{i+1}</div>
+                    <div style="font-size:0.85rem;margin:4px 0;">{v.get("titre","—")[:60]}</div>
+                    <div style="color:#888;font-size:0.8rem;margin-top:6px;">
+                        <strong style="color:#01f0fc;">Pourquoi ça marche :</strong><br>
+                        {v.get("pourquoi_ca_marche","—")}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                repro = v.get("elements_reproductibles", [])
+                if repro:
+                    for r in repro[:2]:
+                        st.markdown(f"✅ {r}")
+
+    # ── BLOC 3 — Patterns gagnants ────────────────────────────────────────────
+    patterns = rapport.get("patterns_gagnants", [])
+    if patterns:
+        st.markdown("### 🔁 Patterns gagnants du compte")
+        for p in patterns[:5]:
+            st.markdown(f"""
+            <div class="card card-blue">
+                <strong style="color:#01f0fc;">{p.get("pattern","—")}</strong>
+                <span style="color:#555;margin-left:12px;font-size:0.8rem;">{p.get("frequence","")}</span><br>
+                <span style="color:#888;font-size:0.85rem;">Impact : {p.get("impact_estime","—")}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ── BLOC 4 — Hooks qui marchent ───────────────────────────────────────────
+    hooks = rapport.get("hooks_qui_marchent", [])
+    if hooks:
+        st.markdown("### 🎣 Top hooks du compte")
+        for h in hooks[:5]:
+            score_h = h.get("score", 0)
+            st.markdown(f"""
+            <div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;padding:0.8rem;margin-bottom:0.5rem;display:flex;gap:1rem;align-items:center;">
+                <span style="font-size:1.2rem;font-weight:900;color:#ff00a4;min-width:35px;">{score_h}/10</span>
+                <div>
+                    <div style="font-style:italic;">«{h.get("texte","—")}»</div>
+                    <div style="color:#555;font-size:0.8rem;margin-top:3px;">{h.get("pourquoi","")}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ── BLOC 5 — Grille complète ──────────────────────────────────────────────
+    if analyses:
+        st.markdown("### 📊 Toutes les vidéos analysées")
+        analyses_sorted = sorted(analyses, key=lambda x: x.get("vues") or 0, reverse=True)
+
+        cols = st.columns(3)
+        for idx, a in enumerate(analyses_sorted):
+            col = cols[idx % 3]
+            with col:
+                vid_id = a.get("video_id", "")
+                shot = os.path.join(SCREENSHOTS_PATH, str(vid_id), "plan_01.jpg")
+                if os.path.exists(shot):
+                    st.image(shot, use_container_width=True)
+                else:
+                    st.markdown('<div style="background:#111;height:100px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#333;font-size:1.5rem;">🎬</div>', unsafe_allow_html=True)
+
+                vues = a.get("vues")
+                vues_str = f"{vues:,}" if vues else "—"
+                score_v = a.get("score_potentiel", "—")
+                st.markdown(f"""
+                <div style="padding:0.4rem 0;">
+                    <div style="font-size:0.85rem;font-weight:600;">{(a.get("titre") or "—")[:45]}</div>
+                    <div style="color:#888;font-size:0.78rem;margin-top:2px;">👁 {vues_str} · Score {score_v}/10</div>
+                    <div style="color:#555;font-size:0.78rem;font-style:italic;">{(a.get("hook_texte") or "")[:50]}</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+    # ── BLOC 6 — Comparaison avec ta base ────────────────────────────────────
+    all_my_videos = get_all_videos_with_stats()
+    my_annotated = [v for v in all_my_videos if v.get("performance_tag") in ["viral", "bon"]]
+
+    if len(my_annotated) >= 5 and analyses:
+        st.markdown("### ⚡ Ce compte vs tes meilleures vidéos")
+
+        def _avg(lst, key):
+            vals = [v.get(key) for v in lst if v.get(key) is not None]
+            return round(sum(vals) / len(vals), 1) if vals else "—"
+
+        compte_data = {
+            "Durée moy (s)": _avg(analyses, "duree"),
+            "Score potentiel": _avg(analyses, "score_potentiel"),
+            "Hook score": _avg(analyses, "hook_score"),
+        }
+        mes_data = {
+            "Durée moy (s)": _avg(my_annotated, "duree_secondes"),
+            "Score potentiel": _avg(my_annotated, "score_potentiel"),
+            "Hook score": _avg(my_annotated, "hook_score"),
+        }
+
+        import pandas as pd
+        df_cmp = pd.DataFrame({
+            "Variable": list(compte_data.keys()),
+            f"@{username}": list(compte_data.values()),
+            "Tes meilleures": list(mes_data.values()),
+        })
+        st.dataframe(df_cmp.set_index("Variable"), use_container_width=True)
+
+    # ── Boutons d'action ──────────────────────────────────────────────────────
+    st.markdown("---")
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+        if st.button("💾 Tout dans la bibliothèque ✓", disabled=True, use_container_width=True):
+            pass
+
+    with col_b:
+        if st.button("🎯 Générer brief inspiré de ce compte", use_container_width=True):
+            st.session_state["brief_from_compte"] = username
+            st.switch_page("pages/4_Generer.py")
+
+    with col_c:
+        # Export rapport texte
+        if rapport and not rapport.get("_error"):
+            rapport_txt = f"RAPPORT COMPTE @{username} — {plateforme}\n{'='*50}\n\n"
+            rapport_txt += f"Score global : {rapport.get('score_compte_global')}/10\n"
+            rapport_txt += f"Verdict : {rapport.get('verdict','')}\n\n"
+            rapport_txt += f"Style : {resume.get('style_visuel_dominant','')}\n"
+            rapport_txt += f"Ton : {resume.get('ton_editorial','')}\n\n"
+            rapport_txt += "PATTERNS GAGNANTS :\n"
+            for p in patterns[:5]:
+                rapport_txt += f"  • {p.get('pattern')} ({p.get('frequence')})\n"
+            rapport_txt += "\nOPPORTUNITÉS INSOLIT :\n"
+            for o in opps:
+                rapport_txt += f"  • {o}\n"
+
+            st.download_button(
+                "📄 Exporter le rapport",
+                data=rapport_txt,
+                file_name=f"rapport_{username}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+
+    # Coût total
+    nb, niveau = get_precision_level()
+    st.markdown(f"""
+    <div style="text-align:center;padding:1rem;color:#444;font-size:0.85rem;">
+        {len(analyses)} vidéos analysées · Coût total : ~${data.get("total_cout",0):.3f} ·
+        Durée : {data.get("elapsed",0)//60}min {data.get("elapsed",0)%60}s ·
+        Base : {nb} annotées
+    </div>
+    """, unsafe_allow_html=True)
