@@ -99,9 +99,10 @@ with st.sidebar:
     st.page_link("pages/4_Generer.py", label="✨ Générer un brief")
     st.page_link("pages/5_Compte.py", label="🔭 Analyser un compte")
     st.page_link("pages/6_Base_Connaissances.py", label="📖 Base de connaissances")
+    st.page_link("pages/7_Enrichir.py", label="📥 Enrichir ma base")
 
     st.divider()
-    st.caption("Propulsé par TwelveLabs · Whisper · Claude")
+    st.caption("Propulsé par Claude Vision · Whisper · ffmpeg")
 
 # ─── Page principale ──────────────────────────────────────────────────────────
 st.markdown("""

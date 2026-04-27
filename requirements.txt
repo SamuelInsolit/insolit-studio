@@ -1,6 +1,5 @@
 streamlit>=1.32.0
 anthropic>=0.30.0
-twelvelabs>=1.2.3
 openai-whisper
 yt-dlp
 pandas

@@ -139,35 +139,46 @@ def get_video_duration(video_path: str) -> float:
 def compress_video(video_path: str, progress_callback=None) -> str:
     """
     Compresse la vidéo pour réduire la taille → traitement rapide.
-    720p max, 900kbps video, 96kbps audio.
-    Retourne le chemin du fichier compressé (ou original si échec).
+    - Skip si déjà ≤ 15MB (inutile de compresser)
+    - preset ultrafast : 3-5s au lieu de 20-30s (légèrement moins bon ratio, mais 5x plus rapide)
+    - 480p max (suffisant pour Vision + scène detection)
+    Retourne le chemin du fichier compressé (ou original si échec/déjà petit).
     """
+    orig_mb = os.path.getsize(video_path) / 1024 / 1024
+
+    # Pas besoin de compresser si déjà petit
+    if orig_mb <= 15:
+        logger.info(f"Compression skippée ({orig_mb:.1f}MB ≤ 15MB)")
+        if progress_callback:
+            progress_callback(f"📁 Fichier léger ({orig_mb:.0f}MB) — compression skippée")
+        return video_path
+
     if progress_callback:
-        progress_callback("🗜️ Compression de la vidéo...")
+        progress_callback(f"🗜️ Compression ({orig_mb:.0f}MB → cible <5MB)...")
 
     base     = os.path.splitext(video_path)[0]
     out_path = f"{base}_c.mp4"
 
-    # Filtre scale : respecte l'orientation portrait/paysage
-    scale_filter = "scale='if(gt(iw,ih),min(720,iw),-2)':'if(gt(iw,ih),-2,min(720,ih))'"
+    # preset ultrafast = 3-5s au lieu de 20-30s — qualité suffisante pour Vision
+    # 480p max (plus petit = plus rapide pour extraction frames)
+    scale_filter = "scale='if(gt(iw,ih),min(480,iw),-2)':'if(gt(iw,ih),-2,min(480,ih))'"
 
     cmd = [
         FFMPEG_BIN, "-y", "-i", video_path,
         "-vf", scale_filter,
-        "-c:v", "libx264", "-crf", "28", "-b:v", "900k", "-maxrate", "1200k",
-        "-c:a", "aac", "-b:a", "96k",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+        "-c:a", "aac", "-b:a", "64k",
         "-movflags", "+faststart",
-        "-threads", "2",
+        "-threads", "0",   # Auto-detect threads (max perf)
         out_path,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, timeout=30)
         if result.returncode == 0 and os.path.exists(out_path):
-            orig_mb  = os.path.getsize(video_path) / 1024 / 1024
-            comp_mb  = os.path.getsize(out_path)   / 1024 / 1024
+            comp_mb = os.path.getsize(out_path) / 1024 / 1024
             logger.info(f"Compression: {orig_mb:.1f}MB → {comp_mb:.1f}MB ({comp_mb/orig_mb*100:.0f}%)")
             if progress_callback:
-                progress_callback(f"🗜️ Vidéo compressée ({orig_mb:.0f}MB → {comp_mb:.0f}MB)")
+                progress_callback(f"🗜️ Compressé ({orig_mb:.0f}MB → {comp_mb:.0f}MB)")
             return out_path
     except Exception as e:
         logger.warning(f"Compression échouée: {e} — utilisation fichier original")
@@ -184,11 +195,11 @@ def detect_scene_changes(video_path: str, duration: float) -> list:
     Retourne une liste de timestamps où des coupes sont détectées.
     """
     try:
-        # Paramètre 0.25 = seuil de détection (0=tout, 1=rien)
+        # Paramètre 0.15 = seuil sensible (0=tout, 1=rien) — détecte les coupes nettes ET les transitions douces
         cmd = [
             FFMPEG_BIN, "-i", video_path,
-            "-filter:v", "select='gt(scene,0.25)',showinfo",
-            "-frames:v", "50",
+            "-filter:v", "select='gt(scene,0.15)',showinfo",
+            "-frames:v", "80",
             "-f", "null", "/dev/null",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -207,9 +218,16 @@ def detect_scene_changes(video_path: str, duration: float) -> list:
 
         timestamps.append(duration)  # Toujours inclure la fin
 
+        # Filtrer les timestamps trop proches (min 0.3s d'écart)
+        filtered = [timestamps[0]]
+        for ts in timestamps[1:]:
+            if ts - filtered[-1] >= 0.3:
+                filtered.append(ts)
+        timestamps = filtered
+
         # Si pas assez de scènes détectées → découpage uniforme
         if len(timestamps) < 3:
-            n = max(4, min(8, int(duration / 4)))
+            n = max(4, min(10, int(duration / 3)))
             timestamps = [0.0] + [round((i + 1) * duration / (n + 1), 2) for i in range(n)] + [duration]
 
         return sorted(set(timestamps))
@@ -220,14 +238,24 @@ def detect_scene_changes(video_path: str, duration: float) -> list:
         return [round(i * duration / (n + 1), 2) for i in range(n + 2)]
 
 
+MAX_FRAMES_VISION = 12   # Max frames envoyées à Claude Vision (coût ≈ 500 tokens/image)
+
+
 def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
     """
     Extrait 1 frame par timestamp détecté (au milieu de chaque plan).
+    Limite à MAX_FRAMES_VISION pour contrôler le coût Claude Vision.
     Retourne liste de {"data": base64_jpeg, "timestamp": float}.
     """
+    # Échantillonnage intelligent si trop de plans
+    intervals = list(range(len(timestamps) - 1))
+    if len(intervals) > MAX_FRAMES_VISION:
+        step = len(intervals) / MAX_FRAMES_VISION
+        intervals = [int(i * step) for i in range(MAX_FRAMES_VISION)]
+        logger.info(f"Sous-échantillonnage: {len(timestamps)-1} plans → {MAX_FRAMES_VISION} frames pour Vision")
+
     frames = []
-    # On prend le milieu de chaque intervalle (pas le début exact)
-    for i in range(len(timestamps) - 1):
+    for i in intervals:
         t_start = timestamps[i]
         t_end   = timestamps[i + 1]
         t_mid   = round((t_start + t_end) / 2, 2)
@@ -503,11 +531,12 @@ def analyze_video(
         video.titre = titre_auto
         session.commit()
 
-        # ── 9. Screenshots ────────────────────────────────────────────────────
-        step("📸 Extraction des screenshots...")
-        shot_paths = extract_screenshots(working_path, plans_data, video_id)
+        # ── 9. Screenshots (lazy — extraits en arrière-plan, pas bloquant) ─────
+        # On extrait seulement les 3 premiers plans pour l'aperçu rapide
+        step("📸 Aperçu rapide (3 premiers plans)...")
+        shot_paths = extract_screenshots(working_path, plans_data[:3], video_id)
         plans_db = session.query(Plan).filter_by(video_id=video_id).order_by(Plan.numero_plan).all()
-        for plan_obj, shot_path in zip(plans_db, shot_paths):
+        for plan_obj, shot_path in zip(plans_db[:3], shot_paths):
             if shot_path:
                 plan_obj.screenshot_path = shot_path
         session.commit()

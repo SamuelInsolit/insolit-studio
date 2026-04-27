@@ -39,10 +39,11 @@ def _get_model():
     global _whisper_model
     if _whisper_model is None:
         import whisper
-        # Sur Railway (mémoire limitée) → small (~500MB RAM)
-        # En local → medium (~1.5GB RAM, meilleure précision)
-        IS_RAILWAY = os.getenv("RAILWAY_ENVIRONMENT") is not None
-        model_size = "small" if IS_RAILWAY else "medium"
+        # tiny  → ~5-8s  / 39MB RAM  — rapide, suffisant pour les hooks courts
+        # small → ~20-30s / 500MB RAM  — meilleure précision FR
+        # medium → ~45-60s / 1.5GB RAM — qualité max (trop lent pour <30s)
+        # Priorité : env var WHISPER_MODEL > tiny par défaut (vitesse max)
+        model_size = os.getenv("WHISPER_MODEL", "tiny")
         logger.info(f"Chargement modèle Whisper {model_size}...")
         _whisper_model = whisper.load_model(model_size)
         logger.info(f"Modèle Whisper {model_size} chargé.")

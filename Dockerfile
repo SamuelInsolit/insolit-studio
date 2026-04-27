@@ -37,15 +37,7 @@ RUN mkdir -p /app/uploads /app/screenshots
 # ── Port ──────────────────────────────────────────────────────────────────────
 EXPOSE 8501
 
-# ── Healthcheck ───────────────────────────────────────────────────────────────
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
-    CMD curl -f http://localhost:8501/_stcore/health || exit 1
-
 # ── Démarrage ─────────────────────────────────────────────────────────────────
-CMD ["python", "-m", "streamlit", "run", "app.py", \
-     "--server.port=8501", \
-     "--server.address=0.0.0.0", \
-     "--server.headless=true", \
-     "--server.enableCORS=false", \
-     "--server.enableXsrfProtection=false", \
-     "--browser.gatherUsageStats=false"]
+# Note: Railway utilise son propre healthcheck (railway.toml) — pas besoin de HEALTHCHECK Docker
+# Le startCommand dans railway.toml utilise $PORT (assigné par Railway)
+CMD ["sh", "-c", "python -m streamlit run app.py --server.port=${PORT:-8501} --server.address=0.0.0.0 --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false --browser.gatherUsageStats=false"]

@@ -186,7 +186,13 @@ def analyze_frames_with_vision(
         "text": (
             f"Vidéo TikTok/Instagram de {video_duration:.0f} secondes. "
             f"Voici {len(frames)} frames extraites, une par plan détecté.\n"
-            "Analyse chaque frame et déduis la structure créative complète.\n"
+            "Analyse chaque frame et déduis la structure créative complète.\n\n"
+            "RÈGLES CRITIQUES :\n"
+            "1. TEXTE : Lis TOUT le texte visible à l'écran (overlay, sous-titres, prix, adresses, emojis) — "
+            "copie-le mot pour mot dans 'texte_visible_ecran'. Si aucun texte → null.\n"
+            "2. PLANS : Chaque frame = un plan distinct. Ne fusionne jamais deux plans.\n"
+            "3. HOOK : Les 3 premières secondes sont le hook — analyse finement le texte ET l'image.\n"
+            "4. PRIX : Si un prix est visible (ex: 6,99€ / 12€), note-le exactement dans texte_visible_ecran.\n"
             f"IMPORTANT: chaque frame correspond à un plan entre les timestamps indiqués."
         )
     })
@@ -229,7 +235,6 @@ def analyze_frames_with_vision(
         usage = {"input_tokens": in_tok, "output_tokens": out_tok, "model": MODEL_FAST, "cout_estime": cost}
         logger.info(f"Vision (Haiku): {in_tok}in/{out_tok}out = ${cost:.5f}")
 
-        from modules.twelvelabs import _parse_pegasus_response
         parsed = _parse_pegasus_response(raw_text)
         return parsed, usage
 
@@ -386,6 +391,37 @@ Rapport de patterns actionnable en français, format markdown:
     except Exception as e:
         logger.error(f"Erreur rapport patterns: {e}")
         return f"Erreur : {e}", {}
+
+
+def _parse_pegasus_response(raw_text: str) -> dict:
+    """Parse la réponse JSON Vision (même logique que l'ancien module twelvelabs)."""
+    text = raw_text.strip()
+    if "```json" in text:
+        text = text.split("```json")[1].split("```")[0].strip()
+    elif "```" in text:
+        text = text.split("```")[1].split("```")[0].strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except json.JSONDecodeError:
+                pass
+    logger.warning("JSON Vision non parsable — structure minimale générée")
+    return {
+        "plans": [], "hook_analyse": {
+            "duree_hook_secondes": 3, "texte_dit": "", "texte_visible": None,
+            "type_hook": "inconnu", "score_accroche": 5,
+            "premiere_impression": "Analyse non disponible", "ce_qui_accroche": "", "ce_qui_manque": None,
+        }, "metriques_globales": {
+            "nb_plans_total": 0, "rythme_coupes_par_seconde": 0,
+            "luminosite_moyenne": 5, "presence_visage_pourcentage": "0%",
+            "proportion_texte_ecran": "0%", "type_tournage": "inconnu", "qualite_globale": 5,
+        },
+    }
 
 
 def _parse_json_response(text: str) -> dict:
