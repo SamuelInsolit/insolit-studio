@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+from pathlib import Path
 from modules._env import _ROOT  # noqa — charge .env
 
 
@@ -14,9 +15,26 @@ MODEL_SMART  = "claude-sonnet-4-5"  # qualité maximale — brief complet
 
 # Tarifs approximatifs ($/M tokens)
 PRICES = {
-    MODEL_FAST:  {"in": 0.80,  "out": 4.0},
-    MODEL_SMART: {"in": 3.0,   "out": 15.0},
+    MODEL_FAST:  {"in": 0.80,  "out": 4.0,  "cache_write": 0.80,  "cache_read": 0.08},
+    MODEL_SMART: {"in": 3.0,   "out": 15.0, "cache_write": 3.0,   "cache_read": 0.30},
 }
+
+# ── Contexte statique Insolit (mis en cache → -90% coût après 1er appel) ─────
+_CONTEXT_PATH = _ROOT / "context_insolit.md"
+_INSOLIT_CONTEXT: str | None = None
+
+
+def _get_insolit_context() -> str:
+    """Charge context_insolit.md une seule fois (lazy loading + mise en cache mémoire)."""
+    global _INSOLIT_CONTEXT
+    if _INSOLIT_CONTEXT is None:
+        try:
+            _INSOLIT_CONTEXT = _CONTEXT_PATH.read_text(encoding="utf-8")
+            logger.info(f"Contexte Insolit chargé: {len(_INSOLIT_CONTEXT)} caractères")
+        except FileNotFoundError:
+            _INSOLIT_CONTEXT = ""
+            logger.warning("context_insolit.md introuvable — fonctionnement sans contexte enrichi")
+    return _INSOLIT_CONTEXT
 
 
 def _get_client():
@@ -24,26 +42,80 @@ def _get_client():
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
-def _call_claude(prompt: str, system: str = None, max_tokens: int = 2048, model: str = MODEL_FAST) -> tuple[str, dict]:
-    """Appelle Claude et retourne (texte, usage)."""
+def _call_claude(
+    prompt: str,
+    system: str = None,
+    max_tokens: int = 2048,
+    model: str = MODEL_FAST,
+    use_context: bool = True,        # Injecte context_insolit.md avec cache
+) -> tuple[str, dict]:
+    """
+    Appelle Claude et retourne (texte, usage).
+    use_context=True : injecte le contexte Insolit avec prompt caching (économise -90% après 1er appel).
+    """
+    import anthropic
     client = _get_client()
-    messages = [{"role": "user", "content": prompt}]
-    kwargs = {"model": model, "max_tokens": max_tokens, "messages": messages}
-    if system:
-        kwargs["system"] = system
 
-    response = client.messages.create(**kwargs)
+    # Construction du système avec cache
+    system_blocks = []
+    if use_context:
+        ctx = _get_insolit_context()
+        if ctx:
+            # Le bloc contexte est marqué cache_control → Anthropic le met en cache
+            system_blocks.append({
+                "type": "text",
+                "text": ctx,
+                "cache_control": {"type": "ephemeral"},  # Cache 5 minutes (renouvelé à chaque appel)
+            })
+    if system:
+        system_blocks.append({"type": "text", "text": system})
+
+    messages = [{"role": "user", "content": prompt}]
+    kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages,
+        "betas": ["prompt-caching-2024-07-31"],  # Active le prompt caching
+    }
+    if system_blocks:
+        kwargs["system"] = system_blocks
+
+    try:
+        response = client.beta.messages.create(**kwargs)
+    except Exception:
+        # Fallback sans caching si le beta n'est pas disponible
+        kwargs.pop("betas", None)
+        if system_blocks:
+            kwargs["system"] = "\n\n".join(b["text"] for b in system_blocks)
+        response = client.messages.create(**kwargs)
+
     text = response.content[0].text
-    p = PRICES.get(model, {"in": 3.0, "out": 15.0})
+    p = PRICES.get(model, {"in": 3.0, "out": 15.0, "cache_write": 3.0, "cache_read": 0.30})
+
+    # Calcul du coût avec cache
+    in_tokens = getattr(response.usage, "input_tokens", 0)
+    out_tokens = getattr(response.usage, "output_tokens", 0)
+    cache_write = getattr(response.usage, "cache_creation_input_tokens", 0)
+    cache_read  = getattr(response.usage, "cache_read_input_tokens", 0)
+
     cost = round(
-        (response.usage.input_tokens * p["in"] + response.usage.output_tokens * p["out"]) / 1_000_000, 5
+        (in_tokens * p["in"] + out_tokens * p["out"] +
+         cache_write * p.get("cache_write", p["in"]) +
+         cache_read  * p.get("cache_read", p["in"] * 0.1)) / 1_000_000,
+        6
     )
+
     usage = {
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
+        "input_tokens": in_tokens,
+        "output_tokens": out_tokens,
+        "cache_write_tokens": cache_write,
+        "cache_read_tokens": cache_read,
         "model": model,
         "cout_estime": cost,
     }
+    if cache_read:
+        logger.info(f"Cache hit! {cache_read} tokens lus du cache (-90% coût)")
+
     return text, usage
 
 
