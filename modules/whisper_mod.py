@@ -81,11 +81,12 @@ def _transcribe_api(video_path: str) -> dict:
     """
     from openai import OpenAI
 
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY", "")
-    # Note: si pas de clé OpenAI séparée, fallback sur transcription locale si dispo
-    if not api_key or api_key.startswith("sk-ant"):
-        logger.warning("Pas de OPENAI_API_KEY — fallback Whisper local")
-        return _transcribe_local(video_path)
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        logger.warning("OPENAI_API_KEY absent — transcription skippée (ajouter la clé dans Railway)")
+        return {"mots": [], "texte_complet": "", "nb_mots": 0,
+                "debit_parole": 0, "silences": [], "langue": "fr",
+                "_info": "Transcription désactivée (OPENAI_API_KEY non configurée)"}
 
     client = OpenAI(api_key=api_key)
 
