@@ -119,6 +119,125 @@ def _call_claude(
     return text, usage
 
 
+_VISION_JSON_STRUCTURE = """{
+  "plans": [
+    {
+      "timestamp_debut": 0.0,
+      "timestamp_fin": 3.0,
+      "type_plan": "macro_plat|plan_moyen|plan_large|visage|texte_ecran|action|transition",
+      "sujet_principal": "ce qu'on voit",
+      "luminosite": 7,
+      "type_lumiere": "naturelle_chaude|naturelle_froide|artificielle|mixte",
+      "mouvement_camera": "statique|travelling|zoom_in|zoom_out|shake",
+      "presence_visage": false,
+      "expression_visage": "neutre|sourire|surprise|reaction|serieux|na",
+      "texte_visible_ecran": null,
+      "couleurs_dominantes": ["couleur1"],
+      "qualite_production": 7,
+      "emotion_transmise": "appétissant|excitant|neutre|drôle",
+      "role_narratif": "hook|contexte|preuve|ambiance|cta|branding",
+      "points_forts": ["point"],
+      "suggestion_amelioration": "suggestion",
+      "scene_change_type": "cut|transition|fade|zoom|pan"
+    }
+  ],
+  "hook_analyse": {
+    "duree_hook_secondes": 3,
+    "texte_dit": "mots exacts du hook",
+    "texte_visible": "texte à l'écran au début ou null",
+    "type_hook": "question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour",
+    "score_accroche": 7,
+    "premiere_impression": "1 phrase",
+    "ce_qui_accroche": "explication",
+    "ce_qui_manque": null
+  },
+  "metriques_globales": {
+    "nb_plans_total": 5,
+    "rythme_coupes_par_seconde": 0.3,
+    "luminosite_moyenne": 7,
+    "presence_visage_pourcentage": "30%",
+    "proportion_texte_ecran": "10%",
+    "type_tournage": "interieur|exterieur|mixte",
+    "qualite_globale": 7
+  }
+}"""
+
+
+def analyze_frames_with_vision(
+    frames: list,
+    video_duration: float,
+) -> tuple[dict, dict]:
+    """
+    Analyse visuelle via Claude Haiku Vision (frames extraites par ffmpeg).
+    Beaucoup plus rapide que TwelveLabs (~10-15s vs 2-3min).
+    frames: [{"data": base64_jpeg, "timestamp_debut": float, "timestamp_fin": float, "timestamp_mid": float}]
+    """
+    if not frames:
+        return {}, {}
+
+    import anthropic as _anthropic
+
+    client = _get_client()
+
+    # Construction du message multimodal
+    content = []
+    content.append({
+        "type": "text",
+        "text": (
+            f"Vidéo TikTok/Instagram de {video_duration:.0f} secondes. "
+            f"Voici {len(frames)} frames extraites, une par plan détecté.\n"
+            "Analyse chaque frame et déduis la structure créative complète.\n"
+            f"IMPORTANT: chaque frame correspond à un plan entre les timestamps indiqués."
+        )
+    })
+
+    for i, frame in enumerate(frames):
+        content.append({
+            "type": "text",
+            "text": f"\nPlan {i+1} — [{frame['timestamp_debut']:.1f}s → {frame['timestamp_fin']:.1f}s] (frame prise à {frame['timestamp_mid']:.1f}s) :"
+        })
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": frame["data"],
+            }
+        })
+
+    content.append({
+        "type": "text",
+        "text": (
+            f"\nRetourne UNIQUEMENT ce JSON valide (sans markdown, sans explication) "
+            f"en utilisant exactement les timestamps fournis :\n{_VISION_JSON_STRUCTURE}"
+        )
+    })
+
+    try:
+        response = client.messages.create(
+            model=MODEL_FAST,
+            max_tokens=2500,
+            messages=[{"role": "user", "content": content}],
+        )
+
+        raw_text = response.content[0].text
+        p = PRICES[MODEL_FAST]
+        in_tok  = response.usage.input_tokens
+        out_tok = response.usage.output_tokens
+        cost    = round((in_tok * p["in"] + out_tok * p["out"]) / 1_000_000, 5)
+
+        usage = {"input_tokens": in_tok, "output_tokens": out_tok, "model": MODEL_FAST, "cout_estime": cost}
+        logger.info(f"Vision (Haiku): {in_tok}in/{out_tok}out = ${cost:.5f}")
+
+        from modules.twelvelabs import _parse_pegasus_response
+        parsed = _parse_pegasus_response(raw_text)
+        return parsed, usage
+
+    except Exception as e:
+        logger.error(f"Erreur Vision: {e}")
+        return {}, {}
+
+
 def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: list) -> tuple[dict, dict]:
     """
     Analyse créative — utilise Haiku (10x moins cher que Sonnet).

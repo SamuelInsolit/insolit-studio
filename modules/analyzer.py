@@ -1,6 +1,7 @@
 import os
 import ssl
 import json
+import base64
 import logging
 import subprocess
 import time
@@ -9,11 +10,11 @@ from pathlib import Path
 from datetime import datetime
 from modules._env import _ROOT  # noqa — charge .env
 
-# Fix SSL pour Whisper et requêtes HTTPS
+# Fix SSL
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
-# Injection PATH anticipée — nécessaire pour ffmpeg (Whisper) et yt-dlp
+# Injection PATH anticipée
 _EXTRA_PATHS = [
     str(Path.home() / "bin"),
     "/Library/Frameworks/Python.framework/Versions/3.14/bin",
@@ -26,22 +27,17 @@ _add = ":".join(p for p in _EXTRA_PATHS if p not in _cur and Path(p).exists())
 if _add:
     os.environ["PATH"] = _add + ":" + _cur
 
-
 logger = logging.getLogger(__name__)
 
-VOLUME_PATH = os.getenv("RAILWAY_VOLUME_PATH", "./uploads")
+VOLUME_PATH    = os.getenv("RAILWAY_VOLUME_PATH", "./uploads")
 SCREENSHOTS_PATH = "./screenshots"
+IS_RAILWAY     = os.getenv("RAILWAY_ENVIRONMENT") is not None or os.path.exists("/usr/bin/ffmpeg")
 
-# Détecte si on tourne sur Railway/Linux ou macOS local
-IS_RAILWAY = os.getenv("RAILWAY_ENVIRONMENT") is not None or os.path.exists("/usr/bin/ffmpeg")
 
-# Chemins des binaires — cherche dans plusieurs emplacements courants
 def _find_bin(name: str) -> str:
     candidates = [
-        # Railway / Linux
         Path("/usr/bin") / name,
         Path("/usr/local/bin") / name,
-        # macOS local
         Path.home() / "bin" / name,
         Path("/Library/Frameworks/Python.framework/Versions/3.14/bin") / name,
         Path("/opt/homebrew/bin") / name,
@@ -49,9 +45,9 @@ def _find_bin(name: str) -> str:
     for p in candidates:
         if p.exists():
             return str(p)
-    return name  # fallback: laisse le shell chercher
+    return name
 
-YTDLP_BIN = _find_bin("yt-dlp")
+YTDLP_BIN  = _find_bin("yt-dlp")
 FFMPEG_BIN = _find_bin("ffmpeg")
 FFPROBE_BIN = _find_bin("ffprobe")
 
@@ -61,26 +57,24 @@ def _ensure_dirs():
     os.makedirs(SCREENSHOTS_PATH, exist_ok=True)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TÉLÉCHARGEMENT / ACQUISITION
+# ─────────────────────────────────────────────────────────────────────────────
+
 def download_video(url: str, video_id: int, progress_callback=None) -> str:
-    """Télécharge une vidéo via yt-dlp — gère TikTok, Instagram, YouTube."""
     _ensure_dirs()
     output_path = os.path.join(VOLUME_PATH, f"{video_id}.mp4")
-
     if progress_callback:
         progress_callback("Téléchargement de la vidéo...")
 
-    is_tiktok = "tiktok.com" in url
+    is_tiktok   = "tiktok.com" in url
     is_instagram = "instagram.com" in url
-
-    # Construire la commande selon la plateforme
-    base_cmd = [YTDLP_BIN, "--no-playlist", "-o", output_path]
+    base_cmd    = [YTDLP_BIN, "--no-playlist", "-o", output_path]
 
     if is_tiktok or is_instagram:
         if not IS_RAILWAY:
-            # macOS local : Chrome cookies disponibles
             base_cmd += ["--cookies-from-browser", "chrome"]
         else:
-            # Railway/serveur : pas de Chrome, utilise user-agent + headers
             base_cmd += [
                 "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
                 "--add-header", "Referer:https://www.tiktok.com/",
@@ -97,23 +91,18 @@ def download_video(url: str, video_id: int, progress_callback=None) -> str:
         try:
             result = subprocess.run(base_cmd, capture_output=True, text=True, timeout=180)
             if result.returncode == 0:
-                # Vérifie que le fichier existe (yt-dlp peut changer l'extension)
                 if not os.path.exists(output_path):
-                    # Cherche un fichier avec le même nom mais extension différente
                     base = os.path.splitext(output_path)[0]
                     for ext in [".mp4", ".webm", ".mkv", ".mov"]:
                         if os.path.exists(base + ext):
                             os.rename(base + ext, output_path)
                             break
-                logger.info(f"Vidéo téléchargée: {output_path}")
                 return output_path
-            else:
-                err = result.stderr[-500:]
-                if "private" in err.lower() or "login" in err.lower():
-                    raise RuntimeError("Compte privé — impossible d'accéder à cette vidéo.")
-                logger.warning(f"yt-dlp tentative {attempt+1}/3 : {err[-200:]}")
-                if attempt < 2:
-                    time.sleep(3)
+            err = result.stderr[-500:]
+            if "private" in err.lower() or "login" in err.lower():
+                raise RuntimeError("Compte privé — impossible d'accéder à cette vidéo.")
+            if attempt < 2:
+                time.sleep(3)
         except subprocess.TimeoutExpired:
             if attempt == 2:
                 raise RuntimeError("Timeout téléchargement (180s dépassé)")
@@ -125,62 +114,190 @@ def download_video(url: str, video_id: int, progress_callback=None) -> str:
 
 
 def copy_uploaded_video(file_bytes: bytes, filename: str, video_id: int) -> str:
-    """Copie un fichier uploadé vers le répertoire de stockage."""
     _ensure_dirs()
     ext = Path(filename).suffix or ".mp4"
     output_path = os.path.join(VOLUME_PATH, f"{video_id}{ext}")
     with open(output_path, "wb") as f:
         f.write(file_bytes)
-    logger.info(f"Fichier copié: {output_path}")
     return output_path
 
 
 def get_video_duration(video_path: str) -> float:
-    """Retourne la durée d'une vidéo en secondes via ffprobe."""
     try:
-        cmd = [
-            FFPROBE_BIN, "-v", "quiet", "-print_format", "json",
-            "-show_format", video_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        cmd = [FFPROBE_BIN, "-v", "quiet", "-print_format", "json", "-show_format", video_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         data = json.loads(result.stdout)
         return float(data["format"]["duration"])
     except Exception:
         return 0.0
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# COMPRESSION VIDÉO (réduit la taille 5-10x pour traitement rapide)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compress_video(video_path: str, progress_callback=None) -> str:
+    """
+    Compresse la vidéo pour réduire la taille → traitement rapide.
+    720p max, 900kbps video, 96kbps audio.
+    Retourne le chemin du fichier compressé (ou original si échec).
+    """
+    if progress_callback:
+        progress_callback("🗜️ Compression de la vidéo...")
+
+    base     = os.path.splitext(video_path)[0]
+    out_path = f"{base}_c.mp4"
+
+    # Filtre scale : respecte l'orientation portrait/paysage
+    scale_filter = "scale='if(gt(iw,ih),min(720,iw),-2)':'if(gt(iw,ih),-2,min(720,ih))'"
+
+    cmd = [
+        FFMPEG_BIN, "-y", "-i", video_path,
+        "-vf", scale_filter,
+        "-c:v", "libx264", "-crf", "28", "-b:v", "900k", "-maxrate", "1200k",
+        "-c:a", "aac", "-b:a", "96k",
+        "-movflags", "+faststart",
+        "-threads", "2",
+        out_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        if result.returncode == 0 and os.path.exists(out_path):
+            orig_mb  = os.path.getsize(video_path) / 1024 / 1024
+            comp_mb  = os.path.getsize(out_path)   / 1024 / 1024
+            logger.info(f"Compression: {orig_mb:.1f}MB → {comp_mb:.1f}MB ({comp_mb/orig_mb*100:.0f}%)")
+            if progress_callback:
+                progress_callback(f"🗜️ Vidéo compressée ({orig_mb:.0f}MB → {comp_mb:.0f}MB)")
+            return out_path
+    except Exception as e:
+        logger.warning(f"Compression échouée: {e} — utilisation fichier original")
+    return video_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DÉTECTION DE SCÈNES (ffmpeg) + EXTRACTION FRAMES pour Vision
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_scene_changes(video_path: str, duration: float) -> list:
+    """
+    Détecte les changements de plan via ffmpeg (scene filter).
+    Retourne une liste de timestamps où des coupes sont détectées.
+    """
+    try:
+        # Paramètre 0.25 = seuil de détection (0=tout, 1=rien)
+        cmd = [
+            FFMPEG_BIN, "-i", video_path,
+            "-filter:v", "select='gt(scene,0.25)',showinfo",
+            "-frames:v", "50",
+            "-f", "null", "/dev/null",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        output = result.stderr  # ffmpeg écrit showinfo sur stderr
+
+        timestamps = [0.0]  # Toujours inclure le début
+        for line in output.split("\n"):
+            if "pts_time:" in line:
+                try:
+                    pts_part = [p for p in line.split() if "pts_time:" in p][0]
+                    ts = float(pts_part.split(":")[1])
+                    if ts > 0.5 and ts < duration - 0.5:  # Ignorer tout début/fin
+                        timestamps.append(round(ts, 2))
+                except Exception:
+                    pass
+
+        timestamps.append(duration)  # Toujours inclure la fin
+
+        # Si pas assez de scènes détectées → découpage uniforme
+        if len(timestamps) < 3:
+            n = max(4, min(8, int(duration / 4)))
+            timestamps = [0.0] + [round((i + 1) * duration / (n + 1), 2) for i in range(n)] + [duration]
+
+        return sorted(set(timestamps))
+
+    except Exception as e:
+        logger.warning(f"Détection scènes échouée: {e}")
+        n = max(4, min(8, int(duration / 4)))
+        return [round(i * duration / (n + 1), 2) for i in range(n + 2)]
+
+
+def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
+    """
+    Extrait 1 frame par timestamp détecté (au milieu de chaque plan).
+    Retourne liste de {"data": base64_jpeg, "timestamp": float}.
+    """
+    frames = []
+    # On prend le milieu de chaque intervalle (pas le début exact)
+    for i in range(len(timestamps) - 1):
+        t_start = timestamps[i]
+        t_end   = timestamps[i + 1]
+        t_mid   = round((t_start + t_end) / 2, 2)
+
+        frame_path = f"/tmp/insolit_f{i:02d}.jpg"
+        cmd = [
+            FFMPEG_BIN, "-y",
+            "-ss", str(t_mid),
+            "-i", video_path,
+            "-frames:v", "1",
+            "-q:v", "4",
+            "-vf", "scale=480:-1",   # 480px largeur — suffisant pour Vision
+            frame_path,
+        ]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=10)
+            if os.path.exists(frame_path):
+                with open(frame_path, "rb") as fh:
+                    data = base64.standard_b64encode(fh.read()).decode("utf-8")
+                frames.append({
+                    "data": data,
+                    "timestamp_debut": t_start,
+                    "timestamp_fin": t_end,
+                    "timestamp_mid": t_mid,
+                })
+                try:
+                    os.remove(frame_path)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Frame {i} échouée: {e}")
+
+    logger.info(f"Frames extraites: {len(frames)} / {len(timestamps)-1} plans détectés")
+    return frames
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCREENSHOTS FINAUX (pour affichage UI)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def extract_screenshots(video_path: str, plans: list, video_id: int, progress_callback=None) -> list:
-    """Extrait 1 frame par plan via ffmpeg."""
     if not plans:
         return []
-
     screenshots_dir = os.path.join(SCREENSHOTS_PATH, str(video_id))
     os.makedirs(screenshots_dir, exist_ok=True)
-
     paths = []
-    total = len(plans)
-
     for i, plan in enumerate(plans):
-        if progress_callback:
-            progress_callback(f"Screenshot {i+1}/{total}...")
-
         ts = plan.get("timestamp_debut", 0)
         output = os.path.join(screenshots_dir, f"plan_{i+1:02d}.jpg")
         try:
-            cmd = [
-                FFMPEG_BIN, "-y", "-ss", str(ts),
-                "-i", video_path,
-                "-frames:v", "1",
-                "-q:v", "2",
-                output
-            ]
+            cmd = [FFMPEG_BIN, "-y", "-ss", str(ts), "-i", video_path,
+                   "-frames:v", "1", "-q:v", "3", output]
             subprocess.run(cmd, capture_output=True, timeout=15)
             paths.append(output if os.path.exists(output) else None)
         except Exception as e:
             logger.warning(f"Screenshot plan {i+1} échoué: {e}")
             paths.append(None)
-
     return paths
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIPELINE PRINCIPAL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def estimate_analysis_time(file_size_bytes: int, duration_seconds: float) -> int:
+    """Estime le temps d'analyse en secondes selon la taille/durée."""
+    # Base: 20s + 0.5s/seconde de vidéo + 2s/MB
+    size_mb = file_size_bytes / 1024 / 1024
+    estimate = 20 + duration_seconds * 0.5 + size_mb * 0.8
+    return int(max(25, min(90, estimate)))
 
 
 def analyze_video(
@@ -190,20 +307,20 @@ def analyze_video(
     is_url: bool = True,
     file_bytes: bytes = None,
     filename: str = None,
+    file_size_bytes: int = 0,
 ) -> dict:
     """
-    Pipeline principal d'analyse vidéo.
-    Retourne un dict complet avec toutes les données.
+    Pipeline principal d'analyse vidéo (Vision-first, rapide).
+    Architecture : ffmpeg compression + scene detection + Claude Vision + Whisper (parallèle).
+    Temps estimé : 25-45s selon durée/taille.
     """
+    from concurrent.futures import ThreadPoolExecutor
     from modules.database import (
         get_session, Video, AnalysePegasus, Plan,
         Transcription, AnalyseCreative, init_db
     )
-    from modules.twelvelabs import (
-        analyze_with_pegasus, get_marengo_embedding, search_similar_videos
-    )
+    from modules.claude_mod import analyze_frames_with_vision, analyze_creative
     from modules.whisper_mod import transcribe
-    from modules.claude_mod import analyze_creative
 
     init_db()
     session = get_session()
@@ -216,7 +333,7 @@ def analyze_video(
             progress_callback(msg)
 
     try:
-        # ── Étape 1 : Création entrée DB ──────────────────────────────────────
+        # ── 1. DB entry ──────────────────────────────────────────────────────
         step("⬇️ Initialisation...")
         video = Video(
             url_source=source if is_url else None,
@@ -231,7 +348,7 @@ def analyze_video(
         session.commit()
         video_id = video.id
 
-        # ── Étape 1 : Acquisition ─────────────────────────────────────────────
+        # ── 2. Acquisition ───────────────────────────────────────────────────
         step("⬇️ Récupération de la vidéo...")
         if is_url:
             video_path = download_video(source, video_id, step)
@@ -242,57 +359,71 @@ def analyze_video(
         video.fichier_path = video_path
         video.duree_secondes = duree
         session.commit()
-        step(f"⬇️ Vidéo récupérée ({duree:.0f}s)")
 
-        # ── Étapes 2+4 : Pegasus + Whisper en parallèle ──────────────────────
-        from concurrent.futures import ThreadPoolExecutor
+        # ── 3. Compression ───────────────────────────────────────────────────
+        step("🗜️ Compression de la vidéo...")
+        compressed_path = compress_video(video_path, step)
+        # Utilise le compressé pour la suite (plus rapide)
+        working_path = compressed_path
 
-        step("🎬 Analyse Pegasus + 📝 Whisper en parallèle...")
+        # ── 4. Détection scènes + extraction frames ──────────────────────────
+        step("📸 Détection des plans (ffmpeg)...")
+        scene_timestamps = detect_scene_changes(working_path, duree)
+        frames = extract_frames_for_vision(working_path, scene_timestamps)
+        step(f"📸 {len(frames)} plans détectés via ffmpeg")
 
-        _pegasus_result = [None]
+        # ── 5. Vision (Claude) + Whisper en PARALLÈLE ───────────────────────
+        step(f"🎬 Analyse Vision + 📝 Transcription en parallèle...")
+
+        _vision_result  = [None]
+        _vision_usage   = [{}]
         _whisper_result = [None]
-        _pegasus_error = [None]
-        _whisper_error = [None]
+        _vision_error   = [None]
+        _whisper_error  = [None]
 
-        def _run_pegasus():
+        def _run_vision():
             try:
-                _pegasus_result[0] = analyze_with_pegasus(video_path, None)
+                res, usg = analyze_frames_with_vision(frames, duree)
+                _vision_result[0] = res
+                _vision_usage[0]  = usg
             except Exception as e:
-                _pegasus_error[0] = e
+                _vision_error[0] = e
 
         def _run_whisper():
             try:
-                _whisper_result[0] = transcribe(video_path, None)
+                _whisper_result[0] = transcribe(working_path, None)
             except Exception as e:
                 _whisper_error[0] = e
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            f_pegasus = executor.submit(_run_pegasus)
+            f_vision  = executor.submit(_run_vision)
             f_whisper = executor.submit(_run_whisper)
-            f_pegasus.result()  # wait
-            f_whisper.result()  # wait
+            f_vision.result()
+            f_whisper.result()
 
-        if _pegasus_error[0]:
-            logger.error(f"Pegasus error: {_pegasus_error[0]}")
-            from modules.twelvelabs import _pegasus_fallback
-            pegasus_data = _pegasus_fallback(video_path)
+        # Résultats Vision
+        if _vision_error[0]:
+            logger.error(f"Vision error: {_vision_error[0]}")
+            pegasus_data = _vision_fallback(duree)
         else:
-            from modules.twelvelabs import _pegasus_fallback
-            pegasus_data = _pegasus_result[0] or _pegasus_fallback(video_path)
+            pegasus_data = _vision_result[0] or _vision_fallback(duree)
+        if _vision_usage[0]:
+            total_cout += _vision_usage[0].get("cout_estime", 0)
 
+        # Résultats Whisper
         if _whisper_error[0]:
             logger.error(f"Whisper error: {_whisper_error[0]}")
             whisper_result = {"mots": [], "texte_complet": "", "nb_mots": 0, "debit_parole": 0, "silences": [], "langue": "fr"}
         else:
             whisper_result = _whisper_result[0] or {"mots": [], "texte_complet": "", "nb_mots": 0, "debit_parole": 0, "silences": [], "langue": "fr"}
 
-        step(f"🎬 {len(pegasus_data.get('plans', []))} plans | 📝 {whisper_result.get('nb_mots', 0)} mots")
-
-        # ── Sauvegarde Pegasus ────────────────────────────────────────────────
         plans_data = pegasus_data.get("plans", [])
-        metriques = pegasus_data.get("metriques_globales", {})
-        hook = pegasus_data.get("hook_analyse", {})
+        metriques  = pegasus_data.get("metriques_globales", {})
+        hook       = pegasus_data.get("hook_analyse", {})
 
+        step(f"🎬 {len(plans_data)} plans | 📝 {whisper_result.get('nb_mots', 0)} mots transcrits")
+
+        # ── 6. Sauvegarde DB (Vision + Whisper) ─────────────────────────────
         ap = AnalysePegasus(
             video_id=video_id,
             raw_json=json.dumps(pegasus_data, ensure_ascii=False),
@@ -313,8 +444,8 @@ def analyze_video(
                 video_id=video_id,
                 numero_plan=i + 1,
                 timestamp_debut=float(p.get("timestamp_debut", 0)),
-                timestamp_fin=float(p.get("timestamp_fin", 0)),
-                duree=float(p.get("timestamp_fin", 0)) - float(p.get("timestamp_debut", 0)),
+                timestamp_fin=float(p.get("timestamp_fin", duree)),
+                duree=float(p.get("timestamp_fin", duree)) - float(p.get("timestamp_debut", 0)),
                 type_plan=p.get("type_plan", ""),
                 description=p.get("sujet_principal", ""),
                 luminosite=float(p.get("luminosite", 5)),
@@ -330,48 +461,23 @@ def analyze_video(
             )
             session.add(plan_obj)
 
-        # ── Sauvegarde Whisper ────────────────────────────────────────────────
         for w in whisper_result.get("mots", []):
-            t = Transcription(
+            session.add(Transcription(
                 video_id=video_id,
                 timestamp=w["start"],
                 mot=w["mot"],
                 confiance=w["confiance"],
-            )
-            session.add(t)
+            ))
 
         session.commit()
 
-        # ── Étape 3 : Marengo embeddings ──────────────────────────────────────
-        step("🔍 Recherche vidéos similaires (Marengo)...")
-        embedding = get_marengo_embedding(video_path)
+        # ── 7. Marengo embedding (optionnel, en arrière-plan) ────────────────
+        # Note: skippé ici pour garder < 30s. Le refaire manuellement si besoin.
         similar_videos = []
 
-        if embedding:
-            ap.set_embedding(embedding)
-            session.commit()
-
-            all_embeddings = _load_all_embeddings(session, exclude_id=video_id)
-            similar_videos = search_similar_videos(embedding, all_embeddings, top_k=5)
-            step(f"🔍 {len(similar_videos)} vidéos similaires trouvées")
-        else:
-            step("🔍 Embedding non disponible")
-
-        # ── Étape 5 : Claude ──────────────────────────────────────────────────
-        step("🧠 Analyse créative (Claude)...")
-        similar_for_claude = [
-            {
-                "video_id": s.get("video_id"),
-                "titre": s.get("titre"),
-                "vues": s.get("vues"),
-                "similarite": s.get("similarite"),
-                "hook_texte": s.get("hook_texte"),
-                "score_potentiel": s.get("score_potentiel"),
-            }
-            for s in similar_videos
-        ]
-
-        creative_data, claude_usage = analyze_creative(pegasus_data, whisper_result, similar_for_claude)
+        # ── 8. Analyse créative Claude ───────────────────────────────────────
+        step("🧠 Analyse créative (Claude Haiku)...")
+        creative_data, claude_usage = analyze_creative(pegasus_data, whisper_result, similar_videos)
         if claude_usage:
             total_cout += claude_usage.get("cout_estime", 0)
 
@@ -396,25 +502,22 @@ def analyze_video(
         titre_auto = _generate_title(metadata, whisper_result, hook)
         video.titre = titre_auto
         session.commit()
-        step("🧠 Analyse créative générée")
 
-        # ── Étape 6 : Screenshots ─────────────────────────────────────────────
+        # ── 9. Screenshots ────────────────────────────────────────────────────
         step("📸 Extraction des screenshots...")
-        shot_paths = extract_screenshots(video_path, plans_data, video_id, step)
-
+        shot_paths = extract_screenshots(working_path, plans_data, video_id)
         plans_db = session.query(Plan).filter_by(video_id=video_id).order_by(Plan.numero_plan).all()
         for plan_obj, shot_path in zip(plans_db, shot_paths):
             if shot_path:
                 plan_obj.screenshot_path = shot_path
         session.commit()
-        step(f"📸 {len([p for p in shot_paths if p])} screenshots extraits")
 
-        # ── Étape 7 : Finalisation ────────────────────────────────────────────
+        # ── 10. Finalisation ──────────────────────────────────────────────────
         video.statut_analyse = "complete"
         session.commit()
 
         elapsed = round(time.time() - start_time)
-        step(f"✅ Terminé en {elapsed}s | Coût estimé : ~${total_cout:.4f}")
+        step(f"✅ Terminé en {elapsed}s | Coût : ~${total_cout:.4f}")
 
         return {
             "success": True,
@@ -431,7 +534,7 @@ def analyze_video(
         }
 
     except Exception as e:
-        logger.error(f"Erreur pipeline analyse: {e}", exc_info=True)
+        logger.error(f"Erreur pipeline: {e}", exc_info=True)
         try:
             video.statut_analyse = "erreur"
             session.commit()
@@ -442,10 +545,46 @@ def analyze_video(
         session.close()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITAIRES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _vision_fallback(duration: float) -> dict:
+    n = max(3, int(duration / 5))
+    plans = []
+    for i in range(n):
+        t0 = round(i * duration / n, 1)
+        t1 = round((i + 1) * duration / n, 1)
+        plans.append({
+            "timestamp_debut": t0, "timestamp_fin": t1,
+            "type_plan": "plan_moyen", "sujet_principal": f"Plan {i+1}",
+            "luminosite": 6, "type_lumiere": "mixte",
+            "mouvement_camera": "statique", "presence_visage": False,
+            "expression_visage": "na", "texte_visible_ecran": None,
+            "couleurs_dominantes": [], "qualite_production": 6,
+            "emotion_transmise": "neutre", "role_narratif": "contexte",
+            "points_forts": [], "suggestion_amelioration": "",
+            "scene_change_type": "cut",
+        })
+    return {
+        "plans": plans,
+        "hook_analyse": {
+            "duree_hook_secondes": 3, "texte_dit": "", "texte_visible": None,
+            "type_hook": "inconnu", "score_accroche": 5,
+            "premiere_impression": "Analyse Vision non disponible",
+            "ce_qui_accroche": "", "ce_qui_manque": None,
+        },
+        "metriques_globales": {
+            "nb_plans_total": n, "rythme_coupes_par_seconde": round(n / max(duration, 1), 2),
+            "luminosite_moyenne": 6, "presence_visage_pourcentage": "0%",
+            "proportion_texte_ecran": "0%", "type_tournage": "inconnu", "qualite_globale": 6,
+        },
+    }
+
+
 def _pct_to_bool(pct_str: str) -> bool:
     try:
-        val = float(str(pct_str).replace("%", "").strip())
-        return val > 20
+        return float(str(pct_str).replace("%", "").strip()) > 20
     except Exception:
         return False
 
@@ -457,16 +596,13 @@ def _load_all_embeddings(session, exclude_id: int = None) -> list:
     )
     if exclude_id:
         q = q.filter(Video.id != exclude_id)
-
     result = []
     for ap, v in q.all():
         emb = ap.get_embedding()
         if emb:
             result.append({
-                "video_id": v.id,
-                "titre": v.titre,
-                "nom_compte": v.nom_compte,
-                "embedding": emb,
+                "video_id": v.id, "titre": v.titre,
+                "nom_compte": v.nom_compte, "embedding": emb,
             })
     return result
 
@@ -475,7 +611,6 @@ def _generate_title(metadata: dict, whisper_data: dict, hook_data: dict) -> str:
     partenaire = metadata.get("partenaire", "")
     ville = metadata.get("ville", "")
     hook_text = hook_data.get("texte_dit", "")
-
     if partenaire and ville:
         return f"{partenaire} — {ville}"
     elif hook_text:

@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import threading
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -41,12 +42,8 @@ with col1:
         ["Mon compte", "Concurrent", "Inspiration", "Secteur"],
         key="type_source"
     )
-    type_map = {
-        "Mon compte": "mon_compte",
-        "Concurrent": "concurrent",
-        "Inspiration": "inspiration",
-        "Secteur": "secteur"
-    }
+    type_map = {"Mon compte": "mon_compte", "Concurrent": "concurrent",
+                "Inspiration": "inspiration", "Secteur": "secteur"}
 
     categorie = st.selectbox(
         "Catégorie",
@@ -65,100 +62,76 @@ st.markdown("---")
 launch_analysis = st.button("🔍 ANALYSER", use_container_width=True, type="primary")
 
 if launch_analysis:
-    has_url = bool(video_url and video_url.strip())
+    has_url  = bool(video_url and video_url.strip())
     has_file = uploaded_file is not None
 
     if not has_url and not has_file:
         st.error("Fournis une URL ou un fichier vidéo.")
         st.stop()
 
-    # ─── Section C — Progression ──────────────────────────────────────────────
+    # Lecture fichier AVANT le thread (Streamlit exige ça)
+    file_bytes = uploaded_file.read() if has_file else None
+    file_size  = len(file_bytes) if file_bytes else 0
+    file_name  = uploaded_file.name if has_file else None
+    size_mb    = file_size / 1024 / 1024 if file_size else 5
+
+    # Estimation temps basée sur taille du fichier
+    estimated_s = int(25 + size_mb * 0.8)
+    estimated_s = max(25, min(90, estimated_s))
+
+    # ─── Section C — Progression ─────────────────────────────────────────────
     st.markdown("---")
 
-    # Container principal de progression
-    progress_container = st.container()
-    with progress_container:
-        progress_bar = st.progress(0)
-        col_status, col_timer = st.columns([4, 1])
-        with col_status:
-            status_placeholder = st.empty()
-        with col_timer:
-            timer_placeholder = st.empty()
+    st.markdown(f"""
+    <div style="background:#0a0a0a;border:1px solid #222;border-left:4px solid #ff00a4;
+                border-radius:10px;padding:1rem 1.4rem;margin-bottom:1rem;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span style="color:#ff00a4;font-weight:700;font-size:0.9em;">⚡ ANALYSE EN COURS</span>
+            <span style="color:#888;font-size:0.8em;">{'📁 ' + f'{size_mb:.1f} MB' if file_size else '🔗 URL'}</span>
+        </div>
+        <div style="color:#888;font-size:0.82em;">
+            Vision + Whisper en parallèle &nbsp;·&nbsp;
+            Durée estimée : <strong style="color:#01f0fc;">{estimated_s}–{estimated_s+20}s</strong>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    steps_container = st.empty()
+    progress_bar = st.progress(0.0)
+    col_s, col_t = st.columns([5, 1])
+    with col_s:
+        status_ph = st.empty()
+    with col_t:
+        timer_ph = st.empty()
+    steps_ph = st.empty()
 
-    STEPS = [
-        ("⬇️", "Récupération vidéo", 8),
-        ("🎬", "Analyse Pegasus + Transcription", 65),
-        ("🔍", "Similarités (Marengo)", 75),
-        ("🧠", "Analyse créative (Claude)", 90),
-        ("📸", "Screenshots", 97),
-        ("✅", "Finalisation", 100),
+    # Timeline des étapes (t0, t1, icon, label)
+    TIMELINE = [
+        (0,   6,  "⬇️",  "Acquisition vidéo"),
+        (6,   13, "🗜️",  "Compression"),
+        (13,  18, "📸",  "Détection des plans"),
+        (18,  38, "🎬",  "Vision + Transcription Whisper"),
+        (38,  50, "🧠",  "Analyse créative Claude"),
+        (50,  55, "📸",  "Screenshots"),
+        (55,  60, "✅",  "Finalisation"),
     ]
 
-    steps_state = ["pending"] * len(STEPS)
-    current_step_idx = [0]
-    start_ts = [time.time()]
-
-    import time as _time
-
-    def _render_steps():
-        lines = []
-        for i, (icon, label, pct) in enumerate(STEPS):
-            state = steps_state[i]
-            if state == "done":
-                lines.append(f"✅ ~~{label}~~")
-            elif state == "running":
-                lines.append(f"⏳ **{icon} {label}**")
+    def _steps_html(elapsed: float) -> str:
+        parts = []
+        for (t0, t1, icon, label) in TIMELINE:
+            if elapsed >= t1:
+                style = "color:#555;text-decoration:line-through;"
+                mark = "✅"
+            elif elapsed >= t0:
+                style = "color:#ff00a4;font-weight:700;"
+                mark = "⏳"
             else:
-                lines.append(f"⬜ {label}")
-        steps_container.markdown("  \n".join(lines))
+                style = "color:#444;"
+                mark = "⬜"
+            parts.append(f'<span style="{style}">{mark} {icon} {label}</span>')
+        return ' &nbsp;·&nbsp; '.join(parts)
 
-    def update_progress(msg: str):
-        # Déterminer l'étape courante selon le message
-        msg_low = msg.lower()
-        if any(k in msg_low for k in ["récupér", "télécharg", "initialisation", "upload"]):
-            idx = 0
-        elif any(k in msg_low for k in ["pegasus", "whisper", "transcri", "plan", "parallèle", "indexation", "analyse"]):
-            idx = 1
-        elif any(k in msg_low for k in ["marengo", "similaire", "embedding"]):
-            idx = 2
-        elif any(k in msg_low for k in ["claude", "créative", "créatif"]):
-            idx = 3
-        elif any(k in msg_low for k in ["screenshot", "frame", "capture"]):
-            idx = 4
-        elif any(k in msg_low for k in ["terminé", "finali", "✅"]):
-            idx = 5
-        else:
-            idx = current_step_idx[0]
-
-        # Marque les étapes précédentes comme done
-        for i in range(idx):
-            steps_state[i] = "done"
-        steps_state[idx] = "running"
-        current_step_idx[0] = idx
-
-        # Calcul du % de progression
-        target_pct = STEPS[idx][2]
-        prev_pct = STEPS[idx - 1][2] if idx > 0 else 0
-        pct = min(target_pct, max(prev_pct, target_pct - 5))
-        progress_bar.progress(pct)
-
-        # Status
-        status_placeholder.markdown(f"**{msg}**")
-
-        # Timer
-        elapsed = int(_time.time() - start_ts[0])
-        m, s = divmod(elapsed, 60)
-        timer_placeholder.markdown(f"⏱️ **{m}:{s:02d}**")
-
-        # Steps visual
-        _render_steps()
-
-    _render_steps()
-
-    from modules.analyzer import analyze_video
-
+    # ─── Lancement analyse en thread de fond ──────────────────────────────────
+    result_holder = {"result": None, "error": None}
     metadata = {
         "type_source": type_map.get(type_source, "inspiration"),
         "nom_compte": nom_compte,
@@ -167,55 +140,100 @@ if launch_analysis:
         "ville": ville,
     }
 
-    with st.spinner("Analyse en cours..."):
-        if has_url:
-            result = analyze_video(
-                source=video_url.strip(),
-                metadata=metadata,
-                progress_callback=update_progress,
-                is_url=True,
-            )
-        else:
-            file_bytes = uploaded_file.read()
-            result = analyze_video(
-                source=uploaded_file.name,
-                metadata=metadata,
-                progress_callback=update_progress,
-                is_url=False,
-                file_bytes=file_bytes,
-                filename=uploaded_file.name,
-            )
+    from modules.analyzer import analyze_video
 
-    progress_bar.progress(100)
+    def _run_analysis():
+        try:
+            if has_url:
+                result_holder["result"] = analyze_video(
+                    source=video_url.strip(), metadata=metadata,
+                    progress_callback=None, is_url=True,
+                )
+            else:
+                result_holder["result"] = analyze_video(
+                    source=file_name, metadata=metadata,
+                    progress_callback=None, is_url=False,
+                    file_bytes=file_bytes, filename=file_name,
+                    file_size_bytes=file_size,
+                )
+        except Exception as e:
+            result_holder["error"] = str(e)
 
-    # Mark all steps done
-    for i in range(len(STEPS)):
-        steps_state[i] = "done"
-    _render_steps()
-    elapsed_total = int(_time.time() - start_ts[0])
-    m, s = divmod(elapsed_total, 60)
-    timer_placeholder.markdown(f"⏱️ **{m}:{s:02d}** total")
+    analysis_thread = threading.Thread(target=_run_analysis, daemon=True)
+    analysis_thread.start()
+    start_ts = time.time()
 
-    if not result.get("success"):
-        st.error(f"Erreur lors de l'analyse : {result.get('error')}")
+    # ─── BOUCLE DE POLLING — UI mise à jour chaque seconde ───────────────────
+    while analysis_thread.is_alive():
+        elapsed = time.time() - start_ts
+
+        # Barre de progression (linéaire jusqu'à 95%)
+        pct = min(0.95, elapsed / max(estimated_s, 30))
+        progress_bar.progress(pct)
+
+        # Étape courante
+        current_icon, current_label = "🔄", "En cours..."
+        for (t0, t1, icon, label) in TIMELINE:
+            if t0 <= elapsed < t1 + 8:
+                current_icon, current_label = icon, label
+                break
+
+        status_ph.markdown(f"**{current_icon} {current_label}...**")
+
+        # Timer + estimation restante
+        m, s   = divmod(int(elapsed), 60)
+        remain = max(0, estimated_s - int(elapsed))
+        rm, rs = divmod(remain, 60)
+        rest_str = f" | ~{rm}:{rs:02d} restant" if remain > 3 else ""
+        timer_ph.markdown(f"⏱️ **{m}:{s:02d}**{rest_str}")
+
+        # Steps visuels
+        steps_ph.markdown(
+            f'<div style="font-size:0.78em;line-height:2.2;padding:4px 0;">{_steps_html(elapsed)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        time.sleep(1)  # Polling chaque seconde
+
+    analysis_thread.join()
+
+    # Finalisation UI
+    progress_bar.progress(1.0)
+    status_ph.empty()
+    timer_ph.empty()
+    steps_ph.empty()
+
+    elapsed_total = round(time.time() - start_ts)
+
+    if result_holder["error"]:
+        st.error(f"Erreur : {result_holder['error']}")
         st.stop()
 
-    # Sauvegarde en session pour affichage
+    result = result_holder["result"]
+    if not result or not result.get("success"):
+        err = result.get("error", "Erreur inconnue") if result else "Pas de résultat"
+        st.error(f"Erreur : {err}")
+        st.stop()
+
     st.session_state["last_analysis"] = result
-    status_placeholder.success(
-        f"✅ Terminé en {result.get('elapsed', '?')}s | Coût estimé : ~${result.get('cout_total', 0):.4f}"
+    m, s = divmod(elapsed_total, 60)
+    cout = result.get("cout_total", 0)
+    st.success(
+        f"✅ Analysé en **{m}:{s:02d}** "
+        f"| {result.get('plans_count', 0)} plans détectés "
+        f"| Coût ~${cout:.4f}"
     )
 
 # ─── Section D — Résultats ────────────────────────────────────────────────────
 if "last_analysis" in st.session_state:
-    result = st.session_state["last_analysis"]
-    pegasus = result.get("pegasus_data", {})
-    whisper = result.get("whisper_data", {})
-    creative = result.get("creative_data", {})
-    similar = result.get("similar_videos", [])
-    hook = pegasus.get("hook_analyse", {})
+    result    = st.session_state["last_analysis"]
+    pegasus   = result.get("pegasus_data", {})
+    whisper   = result.get("whisper_data", {})
+    creative  = result.get("creative_data", {})
+    similar   = result.get("similar_videos", [])
+    hook      = pegasus.get("hook_analyse", {})
     metriques = pegasus.get("metriques_globales", {})
-    plans = pegasus.get("plans", [])
+    plans     = pegasus.get("plans", [])
 
     st.markdown("---")
     st.markdown(f"## 📋 {result.get('titre', 'Résultats')}")
@@ -235,9 +253,8 @@ if "last_analysis" in st.session_state:
             score = creative.get("score_potentiel", 5)
             st.metric("Score potentiel", f"{score}/10")
 
-        # Hook
         hook_texte = hook.get("texte_dit") or creative.get("hook_texte", "")
-        hook_type = hook.get("type_hook") or creative.get("hook_type", "")
+        hook_type  = hook.get("type_hook")  or creative.get("hook_type", "")
         hook_score = hook.get("score_accroche") or creative.get("hook_score", 5)
         if hook_texte:
             st.markdown(f"""
@@ -248,64 +265,38 @@ if "last_analysis" in st.session_state:
             </div>
             """, unsafe_allow_html=True)
 
-        # Points forts / faibles
-        pf = creative.get("points_forts", [])
-        ppf = creative.get("points_faibles", [])
+        pf    = creative.get("points_forts", [])
+        ppf   = creative.get("points_faibles", [])
         recos = creative.get("recommandations", [])
-        if isinstance(pf, str):
-            pf = json.loads(pf) if pf.startswith("[") else [pf]
-        if isinstance(ppf, str):
-            ppf = json.loads(ppf) if ppf.startswith("[") else [ppf]
-        if isinstance(recos, str):
-            recos = json.loads(recos) if recos.startswith("[") else [recos]
+        for lst in [pf, ppf, recos]:
+            pass  # Already lists from JSON
+        if isinstance(pf,    str): pf    = json.loads(pf)    if pf.startswith("[")    else [pf]
+        if isinstance(ppf,   str): ppf   = json.loads(ppf)   if ppf.startswith("[")   else [ppf]
+        if isinstance(recos, str): recos = json.loads(recos)  if recos.startswith("[") else [recos]
 
         col_a, col_b, col_c = st.columns(3)
         with col_a:
             st.markdown("**✅ Ce qui marche**")
-            for pt in (pf[:3] if pf else ["—"]):
-                st.markdown(f"- {pt}")
+            for pt in (pf[:3] if pf else ["—"]): st.markdown(f"- {pt}")
         with col_b:
             st.markdown("**⚠️ Ce qui pénalise**")
-            for pt in (ppf[:2] if ppf else ["—"]):
-                st.markdown(f"- {pt}")
+            for pt in (ppf[:2] if ppf else ["—"]): st.markdown(f"- {pt}")
         with col_c:
             st.markdown("**💡 Recommandations**")
-            for r in (recos[:3] if recos else ["—"]):
-                st.markdown(f"- {r}")
+            for r in (recos[:3] if recos else ["—"]): st.markdown(f"- {r}")
 
-    # ── BLOC 2 — Comparaison base ─────────────────────────────────────────────
-    if similar:
-        st.markdown("### 🔍 Vidéos similaires dans ta base")
-        for s in similar[:3]:
-            with st.container():
-                c1, c2, c3 = st.columns([3, 1, 1])
-                with c1:
-                    st.markdown(f"**{s.get('titre', 'Sans titre')}**")
-                with c2:
-                    vues = s.get("vues")
-                    st.markdown(f"👁 {vues:,}" if vues else "👁 —")
-                with c3:
-                    st.markdown(f"Similarité : **{s.get('similarite', 0):.0f}%**")
-
-        comparaison = creative.get("comparaison_base", "")
-        if comparaison:
-            st.info(comparaison)
-
-    # ── BLOC 3 — Timeline des plans ───────────────────────────────────────────
+    # ── BLOC 2 — Timeline des plans ───────────────────────────────────────────
     if plans:
         st.markdown("### 🎬 Timeline des plans")
         for i, plan in enumerate(plans):
             with st.expander(
                 f"Plan {i+1} | {plan.get('timestamp_debut', 0):.1f}s–{plan.get('timestamp_fin', 0):.1f}s | {plan.get('type_plan', '')}",
-                expanded=i == 0
+                expanded=(i == 0)
             ):
-                # Screenshot si disponible
-                screenshot_path = None
                 screenshots_dir = os.path.join("./screenshots", str(result.get("video_id", "")))
                 shot_file = os.path.join(screenshots_dir, f"plan_{i+1:02d}.jpg")
                 if os.path.exists(shot_file):
                     st.image(shot_file, width=300)
-
                 col_a, col_b = st.columns(2)
                 with col_a:
                     st.markdown(f"**Sujet :** {plan.get('sujet_principal', '—')}")
@@ -314,35 +305,34 @@ if "last_analysis" in st.session_state:
                     st.markdown(f"**Rôle :** {plan.get('role_narratif', '—')}")
                 with col_b:
                     st.markdown(f"**Émotion :** {plan.get('emotion_transmise', '—')}")
-                    texte = plan.get("texte_visible_ecran")
-                    if texte:
-                        st.markdown(f"**Texte écran :** «{texte}»")
-                    pf = plan.get("points_forts", [])
-                    if pf:
-                        st.markdown(f"**Points forts :** {', '.join(pf) if isinstance(pf, list) else pf}")
+                    texte_ecran = plan.get("texte_visible_ecran")
+                    if texte_ecran:
+                        st.markdown(f"**Texte écran :** «{texte_ecran}»")
+                    pf_plan = plan.get("points_forts", [])
+                    if pf_plan:
+                        st.markdown(f"**Points forts :** {', '.join(pf_plan) if isinstance(pf_plan, list) else pf_plan}")
                     sug = plan.get("suggestion_amelioration")
                     if sug:
                         st.caption(f"💡 {sug}")
 
-    # ── BLOC 4 — Hook détaillé ────────────────────────────────────────────────
+    # ── BLOC 3 — Hook détaillé ────────────────────────────────────────────────
     st.markdown("### 🎣 Hook détaillé")
-    with st.container():
-        col_a, col_b = st.columns([1, 2])
-        with col_a:
-            shot_0 = os.path.join("./screenshots", str(result.get("video_id", "")), "plan_01.jpg")
-            if os.path.exists(shot_0):
-                st.image(shot_0, caption="Plan 1 (hook)")
-        with col_b:
-            st.markdown(f"**Texte dit :** {hook.get('texte_dit', '—')}")
-            st.markdown(f"**Texte visible :** {hook.get('texte_visible', '—')}")
-            st.markdown(f"**Type :** {hook.get('type_hook', '—')}")
-            st.markdown(f"**Score :** {hook.get('score_accroche', '?')}/10")
-            st.markdown(f"**Ce qui accroche :** {hook.get('ce_qui_accroche', '—')}")
-            manque = hook.get("ce_qui_manque")
-            if manque:
-                st.warning(f"**Ce qui manque :** {manque}")
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        shot_0 = os.path.join("./screenshots", str(result.get("video_id", "")), "plan_01.jpg")
+        if os.path.exists(shot_0):
+            st.image(shot_0, caption="Plan 1 (hook)")
+    with col_b:
+        st.markdown(f"**Texte dit :** {hook.get('texte_dit', '—')}")
+        st.markdown(f"**Texte visible :** {hook.get('texte_visible', '—')}")
+        st.markdown(f"**Type :** {hook.get('type_hook', '—')}")
+        st.markdown(f"**Score :** {hook.get('score_accroche', '?')}/10")
+        st.markdown(f"**Ce qui accroche :** {hook.get('ce_qui_accroche', '—')}")
+        manque = hook.get("ce_qui_manque")
+        if manque:
+            st.warning(f"**Ce qui manque :** {manque}")
 
-    # ── BLOC 5 — Script mot par mot ───────────────────────────────────────────
+    # ── BLOC 4 — Script mot par mot ───────────────────────────────────────────
     mots = whisper.get("mots", [])
     if mots:
         st.markdown("### 📝 Script mot par mot")
@@ -350,27 +340,24 @@ if "last_analysis" in st.session_state:
         transcript_text = format_transcript_display(mots)
         st.text_area(
             f"Débit : {whisper.get('debit_parole', 0)} mots/s | {whisper.get('nb_mots', 0)} mots",
-            transcript_text,
-            height=200,
-            key="transcript_display"
+            transcript_text, height=200, key="transcript_display"
         )
         if st.button("📋 Copier la transcription"):
             st.code(transcript_text)
 
-    # ── BLOC 6 — Adaptation Insolit ───────────────────────────────────────────
+    # ── BLOC 5 — Adaptation Insolit ───────────────────────────────────────────
     if creative.get("adaptable_insolit") is not False:
         st.markdown("### 🎯 Adaptation Insolit")
         script_adapte = creative.get("script_adapte", "")
         if script_adapte:
             st.markdown(f"""
-            <div class="card" style="border-left:4px solid #FF4444;">
-                <strong>Script adapté :</strong><br>
-                <em>{script_adapte}</em>
+            <div class="card" style="border-left:4px solid #ff00a4;">
+                <strong>Script adapté :</strong><br><em>{script_adapte}</em>
             </div>
             """, unsafe_allow_html=True)
 
         plans_reproduire = creative.get("plans_a_reproduire", [])
-        changements = creative.get("ce_qui_change", [])
+        changements      = creative.get("ce_qui_change", [])
         if isinstance(plans_reproduire, str):
             plans_reproduire = json.loads(plans_reproduire) if plans_reproduire.startswith("[") else [plans_reproduire]
         if isinstance(changements, str):
@@ -380,30 +367,28 @@ if "last_analysis" in st.session_state:
         with col_a:
             if plans_reproduire:
                 st.markdown("**Plans à reproduire :**")
-                for p in plans_reproduire:
-                    st.markdown(f"✅ {p}")
+                for p in plans_reproduire: st.markdown(f"✅ {p}")
         with col_b:
             if changements:
                 st.markdown("**Ce qui change :**")
-                for c in changements:
-                    st.markdown(f"↔️ {c}")
+                for c in changements: st.markdown(f"↔️ {c}")
 
-    # ── BLOC 7 — Enrichissement ───────────────────────────────────────────────
+    # ── BLOC 6 — Enrichissement ───────────────────────────────────────────────
     st.markdown("---")
     from modules.enrichment import render_enrichment_form
     from modules.database import get_session, Stats
 
     video_id = result.get("video_id")
     if video_id:
-        session = get_session()
-        existing = session.query(Stats).filter_by(video_id=video_id).first()
+        s2 = get_session()
+        existing = s2.query(Stats).filter_by(video_id=video_id).first()
         existing_dict = {
             "performance_tag": existing.performance_tag,
             "vues": existing.vues,
             "completion_rate": existing.completion_rate,
             "note_humaine": existing.note_humaine,
         } if existing else None
-        session.close()
+        s2.close()
         render_enrichment_form(video_id, existing_dict)
 
     # ── Actions ───────────────────────────────────────────────────────────────
