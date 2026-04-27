@@ -23,6 +23,9 @@ def get_engine():
     global _engine
     if _engine is None:
         db_url = os.getenv("DATABASE_URL", "sqlite:///insolit_studio.db")
+        # Railway fournit postgres:// mais SQLAlchemy requiert postgresql://
+        if db_url.startswith("postgres://"):
+            db_url = db_url.replace("postgres://", "postgresql://", 1)
         if db_url.startswith("sqlite"):
             _engine = create_engine(
                 db_url,
