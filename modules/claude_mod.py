@@ -222,9 +222,10 @@ def analyze_frames_with_vision(
     })
 
     try:
-        # ~250 tokens output par frame + 600 overhead (structure compacte)
-        # 12 frames → ~3600 tokens → on monte le plafond à 4096
-        max_tok = min(4096, max(2000, len(frames) * 250 + 600))
+        # ~500 tokens output par frame + 1000 overhead (plans verbeux + hook + metriques)
+        # 12 frames → 7000 tokens → largement au-dessus du plafond de troncature
+        # claude-haiku-4-5 supporte jusqu'à 8192 output tokens
+        max_tok = min(8192, max(3000, len(frames) * 500 + 1000))
         response = client.messages.create(
             model=MODEL_FAST,
             max_tokens=max_tok,

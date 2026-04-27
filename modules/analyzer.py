@@ -383,6 +383,28 @@ def analyze_video(
             pegasus_data = _vision_fallback(duree)
         else:
             pegasus_data = _vision_result[0] or _vision_fallback(duree)
+
+        # Garde anti-troncature : si Vision a retourné 0 plans, retry avec 5 frames (plus léger)
+        if not pegasus_data.get("plans"):
+            logger.warning("Vision retourne 0 plans — retry avec 5 frames (JSON tronqué probable)")
+            frames_lite = frames[:5] if frames else []
+            if frames_lite:
+                try:
+                    res2, usg2 = analyze_frames_with_vision(frames_lite, duree)
+                    if res2 and res2.get("plans"):
+                        pegasus_data = res2
+                        if usg2:
+                            total_cout += usg2.get("cout_estime", 0)
+                        logger.info(f"Retry Vision réussi: {len(res2['plans'])} plans")
+                    else:
+                        pegasus_data = _vision_fallback(duree)
+                        logger.warning("Retry Vision aussi vide — fallback plans synthétiques")
+                except Exception as e2:
+                    logger.error(f"Retry Vision échoué: {e2}")
+                    pegasus_data = _vision_fallback(duree)
+            else:
+                pegasus_data = _vision_fallback(duree)
+
         if _vision_usage[0]:
             total_cout += _vision_usage[0].get("cout_estime", 0)
 
