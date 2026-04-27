@@ -223,11 +223,19 @@ with col_result:
             kb_items = kb_session.query(Ressource).order_by(Ressource.created_at.desc()).all()
             for r in kb_items:
                 knowledge_base.append({
-                    "type_ressource": r.type_ressource,
-                    "titre": r.titre,
-                    "contenu": r.contenu,
-                    "performance_tag": r.performance_tag,
-                    "vues_approx": r.vues_approx,
+                    "type_ressource":     r.type_ressource,
+                    "titre":              r.titre,
+                    "contenu":            r.contenu,
+                    "performance_tag":    r.performance_tag,
+                    "vues_approx":        r.vues_approx,
+                    "nb_likes":           getattr(r, "nb_likes", None),
+                    "nb_commentaires":    getattr(r, "nb_commentaires", None),
+                    "nb_partages":        getattr(r, "nb_partages", None),
+                    "nb_enregistrements": getattr(r, "nb_enregistrements", None),
+                    "taux_completion":    getattr(r, "taux_completion", None),
+                    "hook_texte":         getattr(r, "hook_texte", None),
+                    "ce_qui_marche":      getattr(r, "ce_qui_marche", None),
+                    "a_reproduire":       getattr(r, "a_reproduire", None),
                 })
         finally:
             kb_session.close()

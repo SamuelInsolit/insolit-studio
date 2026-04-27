@@ -46,7 +46,39 @@ def get_session() -> Session:
 
 def init_db():
     Base.metadata.create_all(bind=get_engine())
+    _migrate_db(get_engine())
     logger.info("Base de données initialisée.")
+
+
+def _migrate_db(engine):
+    """Ajoute les nouvelles colonnes aux tables existantes (forward-only migrations)."""
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+
+    if "ressources" not in inspector.get_table_names():
+        return  # Sera créée par create_all
+
+    existing = {col["name"] for col in inspector.get_columns("ressources")}
+    new_cols = [
+        ("url_source",          "TEXT"),
+        ("nb_likes",            "INTEGER"),
+        ("nb_commentaires",     "INTEGER"),
+        ("nb_partages",         "INTEGER"),
+        ("nb_enregistrements",  "INTEGER"),
+        ("taux_completion",     "REAL"),
+        ("hook_texte",          "TEXT"),
+        ("ce_qui_marche",       "TEXT"),
+        ("a_reproduire",        "TEXT"),
+        ("contexte",            "TEXT"),
+    ]
+    with engine.begin() as conn:
+        for col_name, col_type in new_cols:
+            if col_name not in existing:
+                try:
+                    conn.execute(text(f"ALTER TABLE ressources ADD COLUMN {col_name} {col_type}"))
+                    logger.info(f"Migration: colonne ressources.{col_name} ajoutée")
+                except Exception as e:
+                    logger.warning(f"Migration {col_name}: {e}")
 
 
 # ─── Modèles ────────────────────────────────────────────────────────────────
@@ -209,18 +241,37 @@ class Ressource(Base):
     """
     Base de connaissances : scripts, patterns, guidelines qui marchent.
     Utilisée par Claude pour enrichir la génération de briefs.
+    Stats complètes + analyse qualitative pour améliorer l'IA avec le temps.
     """
     __tablename__ = "ressources"
 
     id = Column(Integer, primary_key=True)
     type_ressource = Column(String(50))   # script|pattern|guideline|inspiration|competitor
     titre = Column(String(500))
-    contenu = Column(Text)                # Le script/texte/pattern complet
+    contenu = Column(Text)                # Script/texte/pattern complet
     tags = Column(Text)                   # JSON array de tags
-    compte_source = Column(String(200))   # @compte si applicable
-    vues_approx = Column(Integer)         # Vues approximatives
+
+    # ── Source ────────────────────────────────────────────────────────────────
+    url_source = Column(Text)             # URL TikTok/IG de la vidéo source
+    compte_source = Column(String(200))   # @compte source
+
+    # ── Stats engagement (données réelles) ───────────────────────────────────
+    vues_approx = Column(Integer)         # Vues
+    nb_likes = Column(Integer)            # Likes
+    nb_commentaires = Column(Integer)     # Commentaires
+    nb_partages = Column(Integer)         # Partages
+    nb_enregistrements = Column(Integer)  # Enregistrements / Saves
+    taux_completion = Column(Float)       # % de complétion (watch time)
+
+    # ── Analyse qualitative ───────────────────────────────────────────────────
+    hook_texte = Column(Text)             # Texte exact du hook (0-3s)
+    ce_qui_marche = Column(Text)          # Pourquoi ça marche (analyse humaine)
+    a_reproduire = Column(Text)           # Ce qu'on doit copier exactement
+    contexte = Column(Text)              # Contexte spécifique (saison, actu, lieu...)
+
+    # ── Meta ──────────────────────────────────────────────────────────────────
     performance_tag = Column(String(50))  # viral|bon|moyen
-    notes = Column(Text)                  # Notes personnelles
+    notes = Column(Text)                  # Notes libres
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

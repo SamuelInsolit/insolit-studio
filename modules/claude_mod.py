@@ -335,11 +335,44 @@ def generate_brief(
         if top_kb:
             kb_lines = []
             for r in top_kb:
-                type_lbl = {"script": "Script", "pattern": "Pattern", "guideline": "Guideline", "inspiration": "Inspiration"}.get(r.get("type_ressource", ""), "Ressource")
+                type_lbl = {"script": "Script", "pattern": "Pattern", "guideline": "Guideline",
+                            "inspiration": "Inspiration", "competitor": "Concurrent"}.get(r.get("type_ressource", ""), "Ressource")
                 perf = f" [{r['performance_tag'].upper()}]" if r.get("performance_tag") else ""
-                vues = f" | {r['vues_approx']:,} vues" if r.get("vues_approx") else ""
-                kb_lines.append(f"[{type_lbl}{perf}{vues}] {r['titre']}:\n{r['contenu']}")
-            kb_section = f"\n\nBASE DE CONNAISSANCES INSOLIT (scripts/patterns validés):\n" + "\n---\n".join(kb_lines)
+
+                # Stats complètes si disponibles
+                stats_parts = []
+                if r.get("vues_approx"): stats_parts.append(f"{r['vues_approx']:,} vues")
+                if r.get("nb_likes"):    stats_parts.append(f"{r['nb_likes']:,} likes")
+                if r.get("nb_enregistrements"): stats_parts.append(f"{r['nb_enregistrements']:,} saves")
+                if r.get("taux_completion"): stats_parts.append(f"{r['taux_completion']:.0f}% complétion")
+                # Calcul engagement rate
+                vues_n = r.get("vues_approx") or 0
+                if vues_n > 0:
+                    total_eng = (r.get("nb_likes") or 0) + (r.get("nb_commentaires") or 0) + \
+                                (r.get("nb_partages") or 0) + (r.get("nb_enregistrements") or 0)
+                    eng_rate = round(total_eng / vues_n * 100, 1)
+                    if eng_rate > 0: stats_parts.append(f"{eng_rate}% engagement")
+                stats_str = f" | {' · '.join(stats_parts)}" if stats_parts else ""
+
+                # Ligne de base
+                line = f"[{type_lbl}{perf}{stats_str}] {r['titre']}:"
+
+                # Hook exact
+                if r.get("hook_texte"):
+                    line += f"\nHOOK: «{r['hook_texte']}»"
+
+                # Ce qui marche + à reproduire (gold mine pour Claude)
+                if r.get("ce_qui_marche"):
+                    line += f"\nPOURQUOI ÇA MARCHE: {r['ce_qui_marche']}"
+                if r.get("a_reproduire"):
+                    line += f"\nÀ REPRODUIRE: {r['a_reproduire']}"
+
+                # Script
+                line += f"\nSCRIPT:\n{r['contenu']}"
+
+                kb_lines.append(line)
+
+            kb_section = f"\n\nBASE DE CONNAISSANCES INSOLIT (scripts validés avec stats réelles):\n" + "\n---\n".join(kb_lines)
 
     prompt = f"""Brief de tournage TikTok/Reels pour Insolit (bons plans restaurants IDF).
 
