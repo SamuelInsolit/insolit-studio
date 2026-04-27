@@ -21,11 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ── yt-dlp (dernière version) ─────────────────────────────────────────────────
 RUN pip install --no-cache-dir yt-dlp --upgrade
 
-# ── Pré-télécharge le modèle Whisper small ────────────────────────────────────
-# (small ~500MB RAM — adapté aux limites Railway)
-RUN python -c "import whisper; whisper.load_model('small')" || echo "Whisper model download skipped"
-
 # ── App ───────────────────────────────────────────────────────────────────────
+# Note: Whisper model téléchargé au premier usage (évite timeout Railway build)
 COPY . .
 
 # ── Répertoires de données ────────────────────────────────────────────────────
