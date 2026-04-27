@@ -288,6 +288,19 @@ with col_result:
         st.session_state["last_brief_meta"] = {
             "partenaire": partenaire, "ville": ville, "cout": usage.get("cout_estime", 0)
         }
+        # Garder les ressources KB qui ont inspiré ce brief
+        if knowledge_base:
+            viral_first = sorted(
+                knowledge_base,
+                key=lambda r: (
+                    1 if r.get("performance_tag") == "viral" else
+                    2 if r.get("performance_tag") == "bon" else 3,
+                    -(r.get("vues_approx") or 0)
+                )
+            )[:3]
+            st.session_state["last_brief_sources"] = viral_first
+        else:
+            st.session_state["last_brief_sources"] = []
 
         if usage:
             st.caption(f"Généré en ~30s | Coût estimé : ~${usage.get('cout_estime', 0):.4f}")
@@ -306,6 +319,48 @@ with col_result:
             <pre style="white-space:pre-wrap;color:#f0f0f0;font-size:0.85rem;line-height:1.6;">{brief_text}</pre>
         </div>
         """, unsafe_allow_html=True)
+
+        # ── Sources d'inspiration KB ──────────────────────────────────────────
+        sources = st.session_state.get("last_brief_sources", [])
+        if sources:
+            st.markdown("#### 💡 Inspiré de ta Base de Connaissances")
+            for src in sources:
+                perf   = src.get("performance_tag", "")
+                vues   = src.get("vues_approx")
+                titre  = src.get("titre", "—")
+                hook_t = src.get("hook_texte", "")
+                ce_qui_marche = src.get("ce_qui_marche", "")
+                a_reproduire  = src.get("a_reproduire", "")
+
+                if perf == "viral":
+                    icon, color, bg = "🔥", "#00cc66", "#001a0a"
+                elif perf == "bon":
+                    icon, color, bg = "✅", "#01f0fc", "#001a1a"
+                else:
+                    icon, color, bg = "📊", "#888", "#0a0a0a"
+
+                vues_str = (
+                    f"{vues//1_000}k vues" if vues and vues >= 1000
+                    else f"{vues} vues" if vues
+                    else "vues inconnues"
+                )
+
+                extra_lines = []
+                if ce_qui_marche:
+                    extra_lines.append(f"✅ {ce_qui_marche[:80]}")
+                if a_reproduire:
+                    extra_lines.append(f"🔁 {a_reproduire[:80]}")
+
+                st.markdown(f"""
+                <div style="background:{bg};border:1px solid {color};border-left:3px solid {color};
+                            border-radius:8px;padding:0.7rem 1rem;margin-bottom:0.5rem;">
+                    <div style="font-size:0.78em;color:{color};font-weight:700;margin-bottom:3px;">
+                        {icon} INSPIRÉ DE · {perf.upper() if perf else 'BASE'} · {vues_str}
+                    </div>
+                    <div style="font-weight:600;font-size:0.88em;color:#fff;">«{titre}»</div>
+                    {"".join(f'<div style="font-size:0.8em;color:#888;margin-top:3px;">{l}</div>' for l in extra_lines)}
+                </div>
+                """, unsafe_allow_html=True)
 
         # Boutons d'action
         col_a, col_b, col_c = st.columns(3)

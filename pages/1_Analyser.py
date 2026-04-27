@@ -57,9 +57,23 @@ with col2:
     partenaire = st.text_input("Partenaire / Lieu (optionnel)", placeholder="Ex: Chez Marcel, Paris 11e", key="partenaire")
     ville = st.text_input("Ville", placeholder="Ex: Paris", key="ville")
 
-# ─── Bouton Analyser ──────────────────────────────────────────────────────────
+# ─── Options d'analyse ────────────────────────────────────────────────────────
 st.markdown("---")
-launch_analysis = st.button("🔍 ANALYSER", use_container_width=True, type="primary")
+col_mode, col_btn = st.columns([2, 3])
+with col_mode:
+    mode_rapide = st.toggle(
+        "⚡ Mode rapide",
+        value=False,
+        help="Mode rapide : 5 frames au lieu de 12, pas de retry. 2× plus vite, ~40% moins cher. Recommandé pour trier rapidement.",
+        key="mode_rapide_toggle"
+    )
+    if mode_rapide:
+        st.caption("⚡ Rapide : ~20s · moins précis")
+    else:
+        st.caption("🔬 Complet : ~40s · analyse maximale")
+
+with col_btn:
+    launch_analysis = st.button("🔍 ANALYSER", use_container_width=True, type="primary")
 
 if launch_analysis:
     has_url  = bool(video_url and video_url.strip())
@@ -68,6 +82,30 @@ if launch_analysis:
     if not has_url and not has_file:
         st.error("Fournis une URL ou un fichier vidéo.")
         st.stop()
+
+    # ── Opt 1 — Anti-doublons ────────────────────────────────────────────────
+    if has_url:
+        from modules.database import get_session, Video as _Video
+        _dup_session = get_session()
+        try:
+            _existing = _dup_session.query(_Video).filter_by(url_source=video_url.strip()).first()
+        finally:
+            _dup_session.close()
+
+        if _existing:
+            st.warning(
+                f"⚠️ **Cette URL a déjà été analysée** (vidéo #{_existing.id} — "
+                f"*{(_existing.titre or 'Sans titre')[:50]}*)  \n"
+                "Tu peux la retrouver dans ta **📚 Bibliothèque**."
+            )
+            col_force, col_cancel = st.columns(2)
+            with col_force:
+                force_reanalyze = st.button("🔄 Ré-analyser quand même", key="force_reanalyze")
+            with col_cancel:
+                if st.button("📚 Voir dans la bibliothèque", key="goto_biblio"):
+                    st.switch_page("pages/2_Bibliotheque.py")
+            if not force_reanalyze:
+                st.stop()
 
     # Lecture fichier AVANT le thread (Streamlit exige ça)
     file_bytes = uploaded_file.read() if has_file else None
@@ -142,12 +180,15 @@ if launch_analysis:
 
     from modules.analyzer import analyze_video
 
+    _quick_mode = st.session_state.get("mode_rapide_toggle", False)
+
     def _run_analysis():
         try:
             if has_url:
                 result_holder["result"] = analyze_video(
                     source=video_url.strip(), metadata=metadata,
                     progress_callback=None, is_url=True,
+                    quick_mode=_quick_mode,
                 )
             else:
                 result_holder["result"] = analyze_video(
@@ -155,6 +196,7 @@ if launch_analysis:
                     progress_callback=None, is_url=False,
                     file_bytes=file_bytes, filename=file_name,
                     file_size_bytes=file_size,
+                    quick_mode=_quick_mode,
                 )
         except Exception as e:
             result_holder["error"] = str(e)

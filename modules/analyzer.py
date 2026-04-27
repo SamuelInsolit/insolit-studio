@@ -287,6 +287,7 @@ def analyze_video(
     file_bytes: bytes = None,
     filename: str = None,
     file_size_bytes: int = 0,
+    quick_mode: bool = False,
 ) -> dict:
     """
     Pipeline principal d'analyse vidéo (Vision-first, rapide).
@@ -343,10 +344,14 @@ def analyze_video(
         working_path = compress_video(video_path, step)  # no-op, retourne original
 
         # ── 4. Sampling + extraction frames ──────────────────────────────────
-        step("📸 Extraction des frames (sampling uniforme)...")
+        mode_label = "⚡ rapide" if quick_mode else "🔬 complet"
+        step(f"📸 Extraction des frames ({mode_label})...")
         scene_timestamps = detect_scene_changes(working_path, duree)
         frames = extract_frames_for_vision(working_path, scene_timestamps)
-        step(f"📸 {len(frames)} frames extraites pour analyse Vision")
+        # Mode rapide : limiter à 5 frames pour réduire coût et temps
+        if quick_mode and len(frames) > 5:
+            frames = frames[:5]
+        step(f"📸 {len(frames)} frames extraites ({mode_label})")
 
         # ── 5. Vision (Claude) + Whisper en PARALLÈLE ───────────────────────
         step(f"🎬 Analyse Vision + 📝 Transcription en parallèle...")
@@ -384,8 +389,8 @@ def analyze_video(
         else:
             pegasus_data = _vision_result[0] or _vision_fallback(duree)
 
-        # Garde anti-troncature : si Vision a retourné 0 plans, retry avec 5 frames (plus léger)
-        if not pegasus_data.get("plans"):
+        # Garde anti-troncature : si Vision a retourné 0 plans, retry avec 5 frames (sauf mode rapide)
+        if not quick_mode and not pegasus_data.get("plans"):
             logger.warning("Vision retourne 0 plans — retry avec 5 frames (JSON tronqué probable)")
             frames_lite = frames[:5] if frames else []
             if frames_lite:
