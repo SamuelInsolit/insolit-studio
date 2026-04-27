@@ -138,50 +138,15 @@ def get_video_duration(video_path: str) -> float:
 
 def compress_video(video_path: str, progress_callback=None) -> str:
     """
-    Compresse la vidéo pour réduire la taille → traitement rapide.
-    - Skip si déjà ≤ 15MB (inutile de compresser)
-    - preset ultrafast : 3-5s au lieu de 20-30s (légèrement moins bon ratio, mais 5x plus rapide)
-    - 480p max (suffisant pour Vision + scène detection)
-    Retourne le chemin du fichier compressé (ou original si échec/déjà petit).
+    La compression est SKIPPÉE par défaut.
+    ffmpeg travaille directement sur le fichier original (MOV/MP4/HEVC → détection scènes OK).
+    Transcoder prend 20-30s même en ultrafast — bien plus long que le gain obtenu.
+    On garde cette fonction comme no-op pour compatibilité.
     """
     orig_mb = os.path.getsize(video_path) / 1024 / 1024
-
-    # Pas besoin de compresser si déjà petit
-    if orig_mb <= 15:
-        logger.info(f"Compression skippée ({orig_mb:.1f}MB ≤ 15MB)")
-        if progress_callback:
-            progress_callback(f"📁 Fichier léger ({orig_mb:.0f}MB) — compression skippée")
-        return video_path
-
+    logger.info(f"Compression skippée — traitement direct du fichier ({orig_mb:.1f}MB)")
     if progress_callback:
-        progress_callback(f"🗜️ Compression ({orig_mb:.0f}MB → cible <5MB)...")
-
-    base     = os.path.splitext(video_path)[0]
-    out_path = f"{base}_c.mp4"
-
-    # preset ultrafast = 3-5s au lieu de 20-30s — qualité suffisante pour Vision
-    # 480p max (plus petit = plus rapide pour extraction frames)
-    scale_filter = "scale='if(gt(iw,ih),min(480,iw),-2)':'if(gt(iw,ih),-2,min(480,ih))'"
-
-    cmd = [
-        FFMPEG_BIN, "-y", "-i", video_path,
-        "-vf", scale_filter,
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
-        "-c:a", "aac", "-b:a", "64k",
-        "-movflags", "+faststart",
-        "-threads", "0",   # Auto-detect threads (max perf)
-        out_path,
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, timeout=30)
-        if result.returncode == 0 and os.path.exists(out_path):
-            comp_mb = os.path.getsize(out_path) / 1024 / 1024
-            logger.info(f"Compression: {orig_mb:.1f}MB → {comp_mb:.1f}MB ({comp_mb/orig_mb*100:.0f}%)")
-            if progress_callback:
-                progress_callback(f"🗜️ Compressé ({orig_mb:.0f}MB → {comp_mb:.0f}MB)")
-            return out_path
-    except Exception as e:
-        logger.warning(f"Compression échouée: {e} — utilisation fichier original")
+        progress_callback(f"📁 Fichier {orig_mb:.0f}MB — démarrage analyse directe...")
     return video_path
 
 
@@ -191,54 +156,37 @@ def compress_video(video_path: str, progress_callback=None) -> str:
 
 def detect_scene_changes(video_path: str, duration: float) -> list:
     """
-    Détecte les changements de plan via ffmpeg (scene filter).
-    Retourne une liste de timestamps où des coupes sont détectées.
+    Sampling uniforme de la vidéo — rapide (~0s), pas de décodage complet.
+    Claude Vision détermine les vrais changements de plans depuis les frames.
+
+    Pourquoi pas le filtre ffmpeg scene ?
+    → Décoder chaque frame HEVC (iPhone .mov) prend 1-2x la durée vidéo sur CPU.
+    → Le sampling uniforme + Vision donne le même résultat en 10x moins de temps.
+
+    Nombre de frames adapté à la durée :
+    - ≤ 15s : 1 frame/1.5s (max 10)
+    - 15-30s : 1 frame/2.5s (max 12)
+    - 30-60s : 1 frame/4s   (max 15)
+    - > 60s  : 1 frame/6s   (max 15)
     """
-    try:
-        # Paramètre 0.15 = seuil sensible (0=tout, 1=rien) — détecte les coupes nettes ET les transitions douces
-        cmd = [
-            FFMPEG_BIN, "-i", video_path,
-            "-filter:v", "select='gt(scene,0.15)',showinfo",
-            "-frames:v", "80",
-            "-f", "null", "/dev/null",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        output = result.stderr  # ffmpeg écrit showinfo sur stderr
+    if duration <= 15:
+        n_frames = min(7, max(4, int(duration / 2)))
+    elif duration <= 30:
+        n_frames = min(7, max(5, int(duration / 4)))
+    elif duration <= 60:
+        n_frames = min(7, max(6, int(duration / 8)))
+    else:
+        n_frames = 7  # Toujours 7 max pour contrôler le coût/vitesse
 
-        timestamps = [0.0]  # Toujours inclure le début
-        for line in output.split("\n"):
-            if "pts_time:" in line:
-                try:
-                    pts_part = [p for p in line.split() if "pts_time:" in p][0]
-                    ts = float(pts_part.split(":")[1])
-                    if ts > 0.5 and ts < duration - 0.5:  # Ignorer tout début/fin
-                        timestamps.append(round(ts, 2))
-                except Exception:
-                    pass
+    step = duration / (n_frames + 1)
+    timestamps = [0.0] + [round((i + 1) * step, 2) for i in range(n_frames)] + [round(duration, 2)]
+    timestamps = sorted(set(timestamps))
 
-        timestamps.append(duration)  # Toujours inclure la fin
-
-        # Filtrer les timestamps trop proches (min 0.3s d'écart)
-        filtered = [timestamps[0]]
-        for ts in timestamps[1:]:
-            if ts - filtered[-1] >= 0.3:
-                filtered.append(ts)
-        timestamps = filtered
-
-        # Si pas assez de scènes détectées → découpage uniforme
-        if len(timestamps) < 3:
-            n = max(4, min(10, int(duration / 3)))
-            timestamps = [0.0] + [round((i + 1) * duration / (n + 1), 2) for i in range(n)] + [duration]
-
-        return sorted(set(timestamps))
-
-    except Exception as e:
-        logger.warning(f"Détection scènes échouée: {e}")
-        n = max(4, min(8, int(duration / 4)))
-        return [round(i * duration / (n + 1), 2) for i in range(n + 2)]
+    logger.info(f"Sampling uniforme: {len(timestamps)-1} intervalles pour {duration:.0f}s")
+    return timestamps
 
 
-MAX_FRAMES_VISION = 12   # Max frames envoyées à Claude Vision (coût ≈ 500 tokens/image)
+MAX_FRAMES_VISION = 7    # Max frames envoyées à Claude Vision — optimal vitesse/qualité
 
 
 def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
@@ -388,17 +336,14 @@ def analyze_video(
         video.duree_secondes = duree
         session.commit()
 
-        # ── 3. Compression ───────────────────────────────────────────────────
-        step("🗜️ Compression de la vidéo...")
-        compressed_path = compress_video(video_path, step)
-        # Utilise le compressé pour la suite (plus rapide)
-        working_path = compressed_path
+        # ── 3. Préparation (pas de compression — ffmpeg lit directement) ────────
+        working_path = compress_video(video_path, step)  # no-op, retourne original
 
-        # ── 4. Détection scènes + extraction frames ──────────────────────────
-        step("📸 Détection des plans (ffmpeg)...")
+        # ── 4. Sampling + extraction frames ──────────────────────────────────
+        step("📸 Extraction des frames (sampling uniforme)...")
         scene_timestamps = detect_scene_changes(working_path, duree)
         frames = extract_frames_for_vision(working_path, scene_timestamps)
-        step(f"📸 {len(frames)} plans détectés via ffmpeg")
+        step(f"📸 {len(frames)} frames extraites pour analyse Vision")
 
         # ── 5. Vision (Claude) + Whisper en PARALLÈLE ───────────────────────
         step(f"🎬 Analyse Vision + 📝 Transcription en parallèle...")
@@ -531,15 +476,9 @@ def analyze_video(
         video.titre = titre_auto
         session.commit()
 
-        # ── 9. Screenshots (lazy — extraits en arrière-plan, pas bloquant) ─────
-        # On extrait seulement les 3 premiers plans pour l'aperçu rapide
-        step("📸 Aperçu rapide (3 premiers plans)...")
-        shot_paths = extract_screenshots(working_path, plans_data[:3], video_id)
-        plans_db = session.query(Plan).filter_by(video_id=video_id).order_by(Plan.numero_plan).all()
-        for plan_obj, shot_path in zip(plans_db[:3], shot_paths):
-            if shot_path:
-                plan_obj.screenshot_path = shot_path
-        session.commit()
+        # ── 9. Screenshots skippés (extraits on-demand depuis la bibliothèque) ──
+        # Évite 5-10s de traitement ffmpeg non bloquant pour l'utilisateur
+        pass
 
         # ── 10. Finalisation ──────────────────────────────────────────────────
         video.statut_analyse = "complete"

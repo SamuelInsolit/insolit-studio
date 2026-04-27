@@ -220,9 +220,11 @@ def analyze_frames_with_vision(
     })
 
     try:
+        # ~300 tokens output par frame + 600 overhead (structure compacte)
+        max_tok = min(3000, max(1500, len(frames) * 300 + 600))
         response = client.messages.create(
             model=MODEL_FAST,
-            max_tokens=2500,
+            max_tokens=max_tok,
             messages=[{"role": "user", "content": content}],
         )
 
@@ -274,17 +276,14 @@ def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: lis
             for s in similar_videos[:3]
         )
 
-    prompt = f"""Expert TikTok/Instagram food & lifestyle IDF. Analyse cette vidéo.
+    prompt = f"""Expert TikTok food IDF. Analyse en JSON strict (sans markdown).
 
-HOOK: {hook.get('texte_dit','')} | type: {hook.get('type_hook','')} | score: {hook.get('score_accroche',5)}
-MÉTRIQUES: {json.dumps(metriques, ensure_ascii=False)}
-PLANS ({len(plans_summary)}): {json.dumps(plans_summary, ensure_ascii=False)}
-TRANSCRIPTION: {texte}
-Débit: {whisper_data.get('debit_parole',0)} mots/s | {whisper_data.get('nb_mots',0)} mots
-SIMILAIRES: {similar_str or 'aucune'}
+HOOK: {hook.get('texte_dit','')} | {hook.get('type_hook','')} | score:{hook.get('score_accroche',5)}
+PLANS: {json.dumps(plans_summary, ensure_ascii=False)}
+TRANSCRIPT: {texte}
+MOTS: {whisper_data.get('nb_mots',0)} | DÉBIT: {whisper_data.get('debit_parole',0)} mots/s
 
-JSON strict (sans markdown):
-{{"hook_texte":"texte exact","hook_visuel":"description","hook_type":"question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour","hook_score":7.5,"hook_analyse":"analyse précise 1-2 phrases","structure_narrative":"construction narrative","points_forts":["p1","p2","p3"],"points_faibles":["f1","f2"],"score_potentiel":7.0,"score_justification":"justification courte","recommandations":["r1","r2","r3"],"comparaison_base":"comparaison courte","adaptable_insolit":true,"script_adapte":"script exact adapté Insolit","plans_a_reproduire":["plan1","plan2"],"ce_qui_change":["change1"],"note_adaptation":"note globale"}}"""
+{{"hook_texte":"texte","hook_visuel":"desc","hook_type":"question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour","hook_score":7.5,"hook_analyse":"1-2 phrases","structure_narrative":"desc","points_forts":["p1","p2","p3"],"points_faibles":["f1","f2"],"score_potentiel":7.0,"score_justification":"court","recommandations":["r1","r2","r3"],"comparaison_base":"court","adaptable_insolit":true,"script_adapte":"script Insolit","plans_a_reproduire":["plan1"],"note_adaptation":"note"}}"""
 
     try:
         text, usage = _call_claude(prompt, max_tokens=1200, model=MODEL_FAST)
