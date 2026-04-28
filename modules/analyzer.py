@@ -361,6 +361,7 @@ def analyze_video(
             partenaire=metadata.get("partenaire", ""),
             ville=metadata.get("ville", ""),
             statut_analyse="en_cours",
+            type_offre=metadata.get("type_offre", ""),
         )
         session.add(video)
         session.commit()

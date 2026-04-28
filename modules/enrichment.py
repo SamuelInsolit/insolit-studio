@@ -49,6 +49,8 @@ def save_enrichment(
         if note_humaine:
             stats.note_humaine = note_humaine
         stats.annotee_le = datetime.utcnow()
+        from modules.database import compute_engagement_ratios
+        compute_engagement_ratios(stats)
 
         session.commit()
         logger.info(f"Enrichissement sauvegardé: video_id={video_id}, tag={performance_tag}")

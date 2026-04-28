@@ -113,8 +113,32 @@ st.markdown("""
 
 st.markdown('<h1 style="color:#ff00a4;font-weight:900;">📚 Ma bibliothèque</h1>', unsafe_allow_html=True)
 
-from modules.database import get_all_videos_with_stats, get_precision_level, delete_video
+from modules.database import get_all_videos_with_stats, get_precision_level, delete_video, get_session, Stats
 from modules.enrichment import get_precision_badge
+
+
+def _get_engagement_ratios(vid_id):
+    """Retourne (taux_engagement, ratio_saves, ratio_shares) depuis la DB."""
+    sess = get_session()
+    try:
+        s = sess.query(Stats).filter_by(video_id=vid_id).first()
+        if s:
+            return s.taux_engagement, s.ratio_saves, s.ratio_shares
+        return None, None, None
+    finally:
+        sess.close()
+
+
+def _engagement_line(taux_eng, r_saves, r_shares):
+    """Construit la ligne d'affichage des ratios engagement (string)."""
+    parts = []
+    if taux_eng is not None:
+        parts.append("Eng: " + str(taux_eng) + "%")
+    if r_saves is not None and r_saves > 0:
+        parts.append("Save: " + str(r_saves) + "%")
+    if r_shares is not None and r_shares > 0:
+        parts.append("Share: " + str(r_shares) + "%")
+    return " | ".join(parts) if parts else ""
 
 # ─── Initialisation session state ────────────────────────────────────────────
 if "selected_ids" not in st.session_state:
@@ -377,7 +401,11 @@ if view_mode == "Liste":
 
             with cols[offset + 2]:
                 vues = video.get("vues") or 0
-                st.markdown(f"👁 **{vues:,}**" if vues else "👁 —")
+                st.markdown("👁 **" + f"{vues:,}" + "**" if vues else "👁 —")
+                taux_eng, r_saves, r_shares = _get_engagement_ratios(vid_id)
+                eng_line = _engagement_line(taux_eng, r_saves, r_shares)
+                if eng_line:
+                    st.caption(eng_line)
 
             with cols[offset + 3]:
                 st.markdown(
@@ -436,28 +464,33 @@ else:
 
             # Card infos
             perf_badge = _perf_badge_html(perf)
-            vues_str   = f'{video.get("vues",0):,}v' if video.get("vues") else ""
+            vues_str   = (str(video.get("vues", 0)) + "v") if video.get("vues") else ""
             annote_badge = '<span class="badge-done">✓ Annoté</span>' if perf else '<span class="badge-annotate">⚡ À annoter</span>'
+            taux_eng_g, r_saves_g, r_shares_g = _get_engagement_ratios(vid_id)
+            eng_line_g = _engagement_line(taux_eng_g, r_saves_g, r_shares_g)
+            eng_html = ('<div style="margin-top:3px;font-size:0.72rem;color:#888;">' + eng_line_g + '</div>') if eng_line_g else ""
 
-            st.markdown(f"""
-            <div style="padding:0.4rem 0; {border} border-radius:0 0 8px 8px; padding: 0.5rem 0.4rem;">
-                <div style="font-weight:700;font-size:0.85rem;line-height:1.3;
-                            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                    {titre_safe[:45]}
-                </div>
-                <div style="color:#666;font-size:0.75rem;margin-top:2px;">@{compte_safe}</div>
-                <div style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                    <span style="color:#555;font-size:0.75rem;">⏱{video.get('duree_secondes',0):.0f}s</span>
-                    <span style="color:#555;font-size:0.75rem;">📐{video.get('nb_plans','?')}</span>
-                    <span style="color:{score_color};font-size:0.75rem;font-weight:700;">{score}/10</span>
-                </div>
-                <div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-                    {perf_badge}
-                    {f'<span style="color:#666;font-size:0.7rem;">{vues_str}</span>' if vues_str else ''}
-                    {annote_badge}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                '<div style="padding:0.4rem 0; ' + border + ' border-radius:0 0 8px 8px; padding: 0.5rem 0.4rem;">'
+                '<div style="font-weight:700;font-size:0.85rem;line-height:1.3;'
+                'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+                + titre_safe[:45] +
+                '</div>'
+                '<div style="color:#666;font-size:0.75rem;margin-top:2px;">@' + compte_safe + '</div>'
+                '<div style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">'
+                '<span style="color:#555;font-size:0.75rem;">⏱' + str(int(video.get("duree_secondes", 0))) + 's</span>'
+                '<span style="color:#555;font-size:0.75rem;">📐' + str(video.get("nb_plans", "?")) + '</span>'
+                '<span style="color:' + score_color + ';font-size:0.75rem;font-weight:700;">' + str(score) + '/10</span>'
+                '</div>'
+                '<div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">'
+                + perf_badge +
+                ('<span style="color:#666;font-size:0.7rem;">' + vues_str + '</span>' if vues_str else '') +
+                annote_badge +
+                '</div>'
+                + eng_html +
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
             if st.session_state.delete_mode:
                 checked = st.checkbox("Sélectionner", key=f"chk_g_{vid_id}", value=is_sel)

@@ -53,7 +53,7 @@ def get_account_videos(username: str, platform: str, nb_videos: int, progress_cb
         + [
             "--flat-playlist",
             "--playlist-end", str(nb_videos),
-            "--print", "%(id)s\t%(title)s\t%(url)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(duration)s\t%(upload_date)s",
+            "--print", "%(id)s\t%(title)s\t%(url)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(duration)s\t%(upload_date)s\t%(music_track)s\t%(music_author)s\t%(is_original_sound)s",
             "--no-warnings",
             url,
         ]
@@ -82,6 +82,10 @@ def get_account_videos(username: str, platform: str, nb_videos: int, progress_cb
                     try: return float(v)
                     except: return None
 
+                music_track = parts[8] if len(parts) > 8 else ""
+                music_author = parts[9] if len(parts) > 9 else ""
+                is_orig_raw = parts[10] if len(parts) > 10 else ""
+                is_original = is_orig_raw.strip().lower() in ("true", "1", "yes") if is_orig_raw else False
                 videos.append({
                     "id": parts[0] if len(parts) > 0 else "",
                     "titre": parts[1] if len(parts) > 1 else "",
@@ -91,6 +95,9 @@ def get_account_videos(username: str, platform: str, nb_videos: int, progress_cb
                     "comments": safe_int(parts[5]) if len(parts) > 5 else None,
                     "duree": safe_float(parts[6]) if len(parts) > 6 else None,
                     "date": parts[7] if len(parts) > 7 else "",
+                    "music_track": music_track,
+                    "music_author": music_author,
+                    "is_original_sound": is_original,
                 })
 
         logger.info(f"Compte @{username}: {len(videos)} vidéos récupérées")
@@ -170,6 +177,103 @@ Génère un rapport JSON complet (sans markdown) :
         return {"_error": str(e)}, {}
 
 
+def fetch_and_store_comments(url, video_id, ytdlp_cookie_args):
+    """Amélioration 4 — Récupère et stocke les top commentaires d'une vidéo."""
+    import json as _json
+    from modules.database import get_session, TopCommentaire
+    from modules.claude_mod import _call_claude
+
+    tmp_prefix = "/tmp/insolit_comments"
+    tmp_info = tmp_prefix + ".info.json"
+
+    # Nettoyer le fichier éventuel précédent
+    try:
+        os.remove(tmp_info)
+    except Exception:
+        pass
+
+    cmd = (
+        [YTDLP_BIN]
+        + ytdlp_cookie_args
+        + [
+            "--write-comments", "--max-comments", "5",
+            "--skip-download", "--no-warnings",
+            "--write-info-json", "-o", tmp_prefix,
+            url,
+        ]
+    )
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=60)
+    except Exception as e:
+        logger.warning("fetch_and_store_comments subprocess error: " + str(e))
+        return None
+
+    if not os.path.exists(tmp_info):
+        return None
+
+    try:
+        with open(tmp_info, "r", encoding="utf-8") as fh:
+            info = _json.load(fh)
+    except Exception as e:
+        logger.warning("fetch_and_store_comments JSON parse error: " + str(e))
+        return None
+
+    comments = info.get("comments", [])
+    if not comments:
+        return None
+
+    top5 = comments[:5]
+    sess = get_session()
+    insight_str = None
+    try:
+        for pos, c in enumerate(top5):
+            texte = str(c.get("text", ""))[:1000]
+            nb_likes = int(c.get("like_count", 0) or 0)
+            tc_obj = TopCommentaire(
+                video_id=video_id,
+                texte=texte,
+                nb_likes=nb_likes,
+                position=pos + 1,
+            )
+            sess.add(tc_obj)
+        sess.flush()
+
+        # Insight Claude Haiku
+        textes_joint = "\n".join(
+            str(pos + 1) + ". " + str(c.get("text", ""))[:200]
+            for pos, c in enumerate(top5)
+        )
+        prompt = (
+            "Voici les 5 principaux commentaires de cette vidéo :\n"
+            + textes_joint
+            + "\n\nDonne un insight court (1-2 phrases) sur ce que ces commentaires révèlent sur l'audience et pourquoi cette vidéo a engagé. Sois direct et actionnable."
+        )
+        try:
+            insight_text, _ = _call_claude(prompt, max_tokens=200)
+            insight_str = insight_text.strip()
+            # Mettre à jour le premier commentaire avec l'insight
+            for tc in sess.new:
+                if isinstance(tc, TopCommentaire) and tc.video_id == video_id:
+                    tc.insight_claude = insight_str
+                    break
+        except Exception as e:
+            logger.warning("Claude insight commentaires: " + str(e))
+
+        sess.commit()
+    except Exception as e:
+        sess.rollback()
+        logger.warning("fetch_and_store_comments DB error: " + str(e))
+    finally:
+        sess.close()
+
+    try:
+        os.remove(tmp_info)
+    except Exception:
+        pass
+
+    return insight_str
+
+
 # ─── UI ───────────────────────────────────────────────────────────────────────
 
 st.markdown("""
@@ -226,7 +330,11 @@ with st.container():
             key="categorie_compte"
         )
     with col6:
-        st.markdown("<br>", unsafe_allow_html=True)
+        recuperer_commentaires = st.toggle(
+            "Récupérer les commentaires (plus lent +30s)",
+            value=False,
+            key="recup_comments"
+        )
 
 launch_btn = st.button("🚀 LANCER L'ANALYSE DU COMPTE", use_container_width=True, type="primary")
 
@@ -317,7 +425,7 @@ if launch_btn:
             )
             if result.get("success"):
                 # Enrichit avec les stats yt-dlp
-                from modules.database import get_session, Stats
+                from modules.database import get_session, Stats, Video as _VideoModel, compute_engagement_ratios
                 if vid.get("vues") or vid.get("likes"):
                     sess = get_session()
                     try:
@@ -337,10 +445,59 @@ if launch_btn:
                                 stats.performance_tag = "moyen"
                             else:
                                 stats.performance_tag = "mauvais"
+                        compute_engagement_ratios(stats)
                         sess.add(stats)
                         sess.commit()
                     finally:
                         sess.close()
+
+                # Amélioration 3 — jour de publication
+                date_str = vid.get("date", "")
+                if date_str and len(date_str) == 8:
+                    try:
+                        from datetime import datetime as _dt
+                        d = _dt.strptime(date_str, "%Y%m%d")
+                        _JOURS = {
+                            "Monday": "lundi", "Tuesday": "mardi", "Wednesday": "mercredi",
+                            "Thursday": "jeudi", "Friday": "vendredi",
+                            "Saturday": "samedi", "Sunday": "dimanche"
+                        }
+                        jour_fr = _JOURS.get(d.strftime("%A"), d.strftime("%A").lower())
+                        sess2 = get_session()
+                        try:
+                            video_obj = sess2.query(_VideoModel).filter_by(id=result["video_id"]).first()
+                            if video_obj:
+                                video_obj.jour_publication = jour_fr
+                                sess2.commit()
+                        finally:
+                            sess2.close()
+                    except Exception as _e:
+                        logger.warning("jour_publication: " + str(_e))
+
+                # Amélioration 6 — son/musique
+                music_track = vid.get("music_track", "")
+                music_author = vid.get("music_author", "")
+                is_orig = vid.get("is_original_sound", False)
+                if music_track or music_author:
+                    sess3 = get_session()
+                    try:
+                        video_obj3 = sess3.query(_VideoModel).filter_by(id=result["video_id"]).first()
+                        if video_obj3:
+                            video_obj3.nom_son = str(music_track)[:500] if music_track else ""
+                            video_obj3.auteur_son = str(music_author)[:200] if music_author else ""
+                            video_obj3.son_original = bool(is_orig)
+                            sess3.commit()
+                    finally:
+                        sess3.close()
+
+                # Amélioration 4 — commentaires
+                if recuperer_commentaires:
+                    try:
+                        fetch_and_store_comments(
+                            url_video, result["video_id"], get_ytdlp_cookie_args()
+                        )
+                    except Exception as _e:
+                        logger.warning("commentaires: " + str(_e))
 
                 analyses_results.append({
                     "video_id": result.get("video_id"),
@@ -566,6 +723,39 @@ if "last_compte_analysis" in st.session_state:
                 '</div>',
                 unsafe_allow_html=True,
             )
+
+    # ── BLOC Sons — Sons des vidéos analysées ────────────────────────────────
+    from modules.database import get_session as _gs, Video as _VidM
+    _sons_data = []
+    for _a in analyses:
+        _vid_id_s = _a.get("video_id")
+        if _vid_id_s:
+            _s2 = _gs()
+            try:
+                _vo = _s2.query(_VidM).filter_by(id=_vid_id_s).first()
+                if _vo and _vo.nom_son:
+                    _sons_data.append({
+                        "son": _vo.nom_son,
+                        "auteur": _vo.auteur_son or "",
+                        "original": _vo.son_original,
+                    })
+            finally:
+                _s2.close()
+
+    if _sons_data:
+        st.markdown("### Sons des vidéos analysées")
+        from collections import Counter as _Ctr
+        sons_counter = _Ctr(_d["son"] for _d in _sons_data if _d.get("son"))
+        nb_orig = sum(1 for _d in _sons_data if _d.get("original"))
+        st.caption(
+            str(len(_sons_data)) + " vidéos avec son · "
+            + str(nb_orig) + " sons originaux ("
+            + str(round(nb_orig / len(_sons_data) * 100)) + "%)"
+        )
+        for _son, _cnt in sons_counter.most_common(10):
+            _auteur = next((_d["auteur"] for _d in _sons_data if _d["son"] == _son and _d.get("auteur")), "")
+            _label = _son + (" — " + _auteur if _auteur else "") + " ×" + str(_cnt)
+            st.markdown("- " + _label)
 
     # ── BLOC 5 — Grille complète ──────────────────────────────────────────────
     if analyses:

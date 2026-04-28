@@ -58,8 +58,8 @@ def _migrate_db(engine):
     if "ressources" not in inspector.get_table_names():
         return  # Sera créée par create_all
 
-    existing = {col["name"] for col in inspector.get_columns("ressources")}
-    new_cols = [
+    existing_ressources = {col["name"] for col in inspector.get_columns("ressources")}
+    new_cols_ressources = [
         ("url_source",          "TEXT"),
         ("nb_likes",            "INTEGER"),
         ("nb_commentaires",     "INTEGER"),
@@ -72,13 +72,49 @@ def _migrate_db(engine):
         ("contexte",            "TEXT"),
     ]
     with engine.begin() as conn:
-        for col_name, col_type in new_cols:
-            if col_name not in existing:
+        for col_name, col_type in new_cols_ressources:
+            if col_name not in existing_ressources:
                 try:
-                    conn.execute(text(f"ALTER TABLE ressources ADD COLUMN {col_name} {col_type}"))
-                    logger.info(f"Migration: colonne ressources.{col_name} ajoutée")
+                    conn.execute(text("ALTER TABLE ressources ADD COLUMN " + col_name + " " + col_type))
+                    logger.info("Migration: colonne ressources." + col_name + " ajoutée")
                 except Exception as e:
-                    logger.warning(f"Migration {col_name}: {e}")
+                    logger.warning("Migration " + col_name + ": " + str(e))
+
+    # Migrations table videos
+    if "videos" in inspector.get_table_names():
+        existing_videos = {col["name"] for col in inspector.get_columns("videos")}
+        new_cols_videos = [
+            ("type_offre",       "TEXT"),
+            ("jour_publication", "TEXT"),
+            ("nom_son",          "TEXT"),
+            ("auteur_son",       "TEXT"),
+            ("son_original",     "BOOLEAN"),
+        ]
+        with engine.begin() as conn:
+            for col_name, col_type in new_cols_videos:
+                if col_name not in existing_videos:
+                    try:
+                        conn.execute(text("ALTER TABLE videos ADD COLUMN " + col_name + " " + col_type))
+                        logger.info("Migration: colonne videos." + col_name + " ajoutée")
+                    except Exception as e:
+                        logger.warning("Migration videos." + col_name + ": " + str(e))
+
+    # Migrations table stats
+    if "stats" in inspector.get_table_names():
+        existing_stats = {col["name"] for col in inspector.get_columns("stats")}
+        new_cols_stats = [
+            ("taux_engagement", "REAL"),
+            ("ratio_saves",     "REAL"),
+            ("ratio_shares",    "REAL"),
+        ]
+        with engine.begin() as conn:
+            for col_name, col_type in new_cols_stats:
+                if col_name not in existing_stats:
+                    try:
+                        conn.execute(text("ALTER TABLE stats ADD COLUMN " + col_name + " " + col_type))
+                        logger.info("Migration: colonne stats." + col_name + " ajoutée")
+                    except Exception as e:
+                        logger.warning("Migration stats." + col_name + ": " + str(e))
 
 
 # ─── Modèles ────────────────────────────────────────────────────────────────
@@ -99,6 +135,14 @@ class Video(Base):
     duree_secondes = Column(Float)
     statut_analyse = Column(String(50), default="en_attente")
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Amélioration 2 — type d'offre
+    type_offre = Column(String(100))
+    # Amélioration 3 — jour de publication
+    jour_publication = Column(String(20))
+    # Amélioration 6 — son/musique
+    nom_son = Column(String(500))
+    auteur_son = Column(String(200))
+    son_original = Column(Boolean)
 
     analyse_pegasus = relationship("AnalysePegasus", back_populates="video", uselist=False)
     plans = relationship("Plan", back_populates="video")
@@ -211,8 +255,25 @@ class Stats(Base):
     note_humaine = Column(Text)
     annotee_par = Column(String(100))
     annotee_le = Column(DateTime)
+    # Amélioration 5 — ratios engagement
+    taux_engagement = Column(Float)
+    ratio_saves = Column(Float)
+    ratio_shares = Column(Float)
 
     video = relationship("Video", back_populates="stats")
+
+
+class TopCommentaire(Base):
+    """Amélioration 4 — Top commentaires des vidéos virales."""
+    __tablename__ = "top_commentaires"
+
+    id = Column(Integer, primary_key=True)
+    video_id = Column(Integer, ForeignKey("videos.id"))
+    texte = Column(Text)
+    nb_likes = Column(Integer, default=0)
+    position = Column(Integer)
+    insight_claude = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Brief(Base):
@@ -500,6 +561,20 @@ def delete_video(video_id: int) -> dict:
         session.close()
 
 
+def compute_engagement_ratios(stats_obj):
+    """Amélioration 5 — Calcule et stocke les ratios d'engagement en place."""
+    vues = stats_obj.vues or 0
+    if vues > 0:
+        likes    = stats_obj.likes    or 0
+        comments = stats_obj.comments or 0
+        shares   = stats_obj.shares   or 0
+        saves    = stats_obj.saves    or 0
+        total_eng = likes + comments + shares + saves
+        stats_obj.taux_engagement = round(total_eng / vues * 100, 2)
+        stats_obj.ratio_saves     = round(saves / vues * 100, 2)
+        stats_obj.ratio_shares    = round(shares / vues * 100, 2)
+
+
 def get_best_videos(source_filter="all", limit=10):
     session = get_session()
     try:
@@ -595,6 +670,147 @@ def get_full_knowledge_context() -> dict:
         nb_viral = sum(1 for v in videos_annotees if v.stats and v.stats.performance_tag == "viral")
         nb_bon   = sum(1 for v in videos_annotees if v.stats and v.stats.performance_tag == "bon")
 
+        # ── Amélioration 1 — Agrégation visuelles virales ─────────────────────
+        caracteristiques_visuelles_virales = {}
+        try:
+            from collections import Counter
+            videos_virales = (
+                session.query(Video)
+                .join(Stats)
+                .filter(Stats.performance_tag == "viral")
+                .filter(Video.statut_analyse == "complete")
+                .all()
+            )
+            virales_avec_plans = [v for v in videos_virales if v.plans]
+            if len(virales_avec_plans) >= 3:
+                plans_1 = []
+                for v in virales_avec_plans:
+                    plan1 = next((p for p in v.plans if p.numero_plan == 1), None)
+                    if plan1:
+                        plans_1.append(plan1)
+                if plans_1:
+                    types_count = Counter(p.type_plan for p in plans_1 if p.type_plan)
+                    roles_count = Counter(p.role_narratif for p in plans_1 if p.role_narratif)
+                    durees = [p.duree for p in plans_1 if p.duree]
+                    visages = [p for p in plans_1 if p.presence_visage and p.timestamp_debut is not None and p.timestamp_debut < 5]
+                    lumin_all = []
+                    for v in virales_avec_plans:
+                        if v.analyse_pegasus and v.analyse_pegasus.luminosite_moyenne:
+                            lumin_all.append(v.analyse_pegasus.luminosite_moyenne)
+                    caracteristiques_visuelles_virales = {
+                        "nb_videos_virales_analysees": len(virales_avec_plans),
+                        "plan_1_type_dominant": types_count.most_common(1)[0][0] if types_count else "",
+                        "plan_1_duree_moyenne": round(sum(durees) / len(durees), 2) if durees else 0,
+                        "presence_visage_5s": round(len(visages) / len(plans_1), 2) if plans_1 else 0,
+                        "role_hook_dominant": roles_count.most_common(1)[0][0] if roles_count else "",
+                        "luminosite_moyenne_virales": round(sum(lumin_all) / len(lumin_all), 2) if lumin_all else 0,
+                    }
+        except Exception as _e:
+            logger.warning("caracteristiques_visuelles_virales: " + str(_e))
+
+        # ── Amélioration 2 — Performance par type d'offre ─────────────────────
+        performance_par_offre = {}
+        try:
+            videos_avec_offre = (
+                session.query(Video)
+                .join(Stats)
+                .filter(Video.type_offre.isnot(None))
+                .filter(Video.type_offre != "")
+                .filter(Video.statut_analyse == "complete")
+                .all()
+            )
+            offre_buckets = {}
+            for v in videos_avec_offre:
+                offre = v.type_offre or "Non spécifié"
+                if offre not in offre_buckets:
+                    offre_buckets[offre] = []
+                offre_buckets[offre].append(v)
+            for offre, vids in offre_buckets.items():
+                vues_list = [v.stats.vues for v in vids if v.stats and v.stats.vues]
+                comp_list = [v.stats.completion_rate for v in vids if v.stats and v.stats.completion_rate]
+                nb_viral_offre = sum(1 for v in vids if v.stats and v.stats.performance_tag == "viral")
+                performance_par_offre[offre] = {
+                    "nb_videos": len(vids),
+                    "vues_moyennes": round(sum(vues_list) / len(vues_list)) if vues_list else 0,
+                    "completion_moyen": round(sum(comp_list) / len(comp_list), 1) if comp_list else 0,
+                    "taux_viral": round(nb_viral_offre / len(vids), 2) if vids else 0,
+                }
+        except Exception as _e:
+            logger.warning("performance_par_offre: " + str(_e))
+
+        # ── Amélioration 3 — Timing optimal ───────────────────────────────────
+        timing_optimal = {}
+        try:
+            videos_avec_jour = (
+                session.query(Video)
+                .join(Stats)
+                .filter(Video.jour_publication.isnot(None))
+                .filter(Video.jour_publication != "")
+                .filter(Video.statut_analyse == "complete")
+                .all()
+            )
+            jour_buckets = {}
+            for v in videos_avec_jour:
+                jour = v.jour_publication
+                if jour not in jour_buckets:
+                    jour_buckets[jour] = []
+                if v.stats and v.stats.vues:
+                    jour_buckets[jour].append(v.stats.vues)
+            jour_moyennes = {}
+            for jour, vues_list in jour_buckets.items():
+                if vues_list:
+                    jour_moyennes[jour] = round(sum(vues_list) / len(vues_list))
+            if jour_moyennes:
+                meilleur_jour = max(jour_moyennes, key=jour_moyennes.get)
+                timing_optimal = {
+                    "vues_par_jour": jour_moyennes,
+                    "meilleur_jour": meilleur_jour,
+                    "vues_moyennes_meilleur_jour": jour_moyennes[meilleur_jour],
+                }
+        except Exception as _e:
+            logger.warning("timing_optimal: " + str(_e))
+
+        # ── Amélioration 4 — Insights commentaires viraux ─────────────────────
+        insights_commentaires_viraux = []
+        try:
+            commentaires_viraux = (
+                session.query(TopCommentaire)
+                .join(Video, TopCommentaire.video_id == Video.id)
+                .join(Stats, Stats.video_id == Video.id)
+                .filter(Stats.performance_tag == "viral")
+                .filter(TopCommentaire.insight_claude.isnot(None))
+                .order_by(TopCommentaire.created_at.desc())
+                .limit(5)
+                .all()
+            )
+            insights_commentaires_viraux = [c.insight_claude for c in commentaires_viraux if c.insight_claude]
+        except Exception as _e:
+            logger.warning("insights_commentaires_viraux: " + str(_e))
+
+        # ── Amélioration 6 — Analyse sons ─────────────────────────────────────
+        analyse_sons = {}
+        try:
+            from collections import Counter as _Counter
+            videos_avec_son = (
+                session.query(Video)
+                .join(Stats)
+                .filter(Stats.performance_tag == "viral")
+                .filter(Video.nom_son.isnot(None))
+                .filter(Video.nom_son != "")
+                .filter(Video.statut_analyse == "complete")
+                .all()
+            )
+            if videos_avec_son:
+                nb_original = sum(1 for v in videos_avec_son if v.son_original)
+                sons_counter = _Counter(v.nom_son for v in videos_avec_son if v.nom_son)
+                analyse_sons = {
+                    "nb_videos_avec_son": len(videos_avec_son),
+                    "ratio_son_original": round(nb_original / len(videos_avec_son), 2),
+                    "sons_frequents": [{"son": s, "count": c} for s, c in sons_counter.most_common(5)],
+                }
+        except Exception as _e:
+            logger.warning("analyse_sons: " + str(_e))
+
         return {
             "scripts_viraux":    scripts_viraux,
             "hooks_performants": hooks_performants,
@@ -609,6 +825,11 @@ def get_full_knowledge_context() -> dict:
                 "nb_viral":            nb_viral,
                 "nb_bon":              nb_bon,
             },
+            "caracteristiques_visuelles_virales": caracteristiques_visuelles_virales,
+            "performance_par_offre":              performance_par_offre,
+            "timing_optimal":                     timing_optimal,
+            "insights_commentaires_viraux":       insights_commentaires_viraux,
+            "analyse_sons":                       analyse_sons,
         }
     finally:
         session.close()

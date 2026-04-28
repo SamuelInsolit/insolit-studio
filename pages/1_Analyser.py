@@ -51,6 +51,12 @@ with col1:
          "Lifestyle", "Voyage IDF", "Autre"],
         key="categorie"
     )
+    type_offre = st.selectbox(
+        "Type d'offre",
+        ["Non spécifié", "Prix choc", "Exclusivité", "Nouveauté", "Événement limité",
+         "Découverte", "Comparaison", "Gratuit / Offert", "Autre"],
+        key="type_offre"
+    )
 
 with col2:
     nom_compte = st.text_input("Compte source (@...)", placeholder="@nomducompte", key="nom_compte")
@@ -176,6 +182,7 @@ if launch_analysis:
         "categorie": categorie,
         "partenaire": partenaire,
         "ville": ville,
+        "type_offre": type_offre,
     }
 
     from modules.analyzer import analyze_video
