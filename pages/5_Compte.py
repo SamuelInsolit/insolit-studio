@@ -1,3 +1,4 @@
+import html as _html
 import json
 import os
 import time
@@ -5,6 +6,13 @@ import subprocess
 import logging
 import streamlit as st
 from dotenv import load_dotenv
+
+
+def _e(val) -> str:
+    """html.escape sur n'importe quelle valeur — indispensable avant injection dans du HTML."""
+    if val is None:
+        return "—"
+    return _html.escape(str(val))
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -169,9 +177,12 @@ Génère un rapport JSON complet (sans markdown) :
 }}"""
 
     try:
-        text, usage = _call_claude(prompt, max_tokens=4096)
+        text, usage = _call_claude(prompt, max_tokens=7000)
         from modules.claude_mod import _parse_json_response
-        return _parse_json_response(text), usage
+        parsed = _parse_json_response(text)
+        if "_error" in parsed:
+            logger.warning(f"Rapport compte JSON error: {parsed.get('_error')} | raw[:200]: {text[:200]}")
+        return parsed, usage
     except Exception as e:
         logger.error(f"Erreur rapport compte: {e}")
         return {"_error": str(e)}, {}
@@ -595,51 +606,66 @@ if "last_compte_analysis" in st.session_state:
     st.markdown("---")
 
     # ── BLOC 1 — Fiche compte ─────────────────────────────────────────────────
-    score = rapport.get("score_compte_global", "—")
-    score_bar = int(float(score) * 10) if isinstance(score, (int, float)) else 50
+    score_raw = rapport.get("score_compte_global", None)
+    try:
+        score_val = float(score_raw)
+        score_display = str(round(score_val, 1))
+        score_bar = int(score_val * 10)
+    except (TypeError, ValueError):
+        score_display = "—"
+        score_bar = 50
 
     pf = resume.get("points_forts_compte", [])
     ppf = resume.get("points_faibles_compte", [])
     opps = rapport.get("opportunites_insolit", [])
 
-    st.markdown(f"""
-    <div class="fiche-compte">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
-            <div>
-                <span style="font-size:1.4rem;font-weight:900;color:#ff00a4;">@{username}</span>
-                <span style="color:#555;margin-left:8px;">{plateforme}</span>
-            </div>
-            <div style="text-align:right;">
-                <div style="font-size:0.85rem;color:#888;">{len(analyses)} vidéos analysées</div>
-                <div style="font-size:1.1rem;font-weight:700;color:#01f0fc;">Score global : {score}/10</div>
-                <div style="background:#111;border-radius:4px;height:6px;width:150px;margin-top:4px;">
-                    <div style="background:linear-gradient(90deg,#0000ff,#ff00a4);width:{score_bar}%;height:6px;border-radius:4px;"></div>
-                </div>
-            </div>
-        </div>
-        <div style="margin-top:1rem;display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;">
-            <div>
-                <div style="font-size:0.7rem;color:#555;text-transform:uppercase;letter-spacing:1px;">Style</div>
-                <div style="color:#01f0fc;font-size:0.9rem;">{resume.get("style_visuel_dominant","—")}</div>
-                <div style="font-size:0.7rem;color:#555;margin-top:8px;text-transform:uppercase;letter-spacing:1px;">Ton</div>
-                <div style="color:#01f0fc;font-size:0.9rem;">{resume.get("ton_editorial","—")}</div>
-            </div>
-            <div>
-                <div style="font-size:0.75rem;color:#888;margin-bottom:4px;">✅ Points forts</div>
-                {"".join(f'<div style="font-size:0.85rem;margin-bottom:3px;">• {p}</div>' for p in pf[:3])}
-            </div>
-            <div>
-                <div style="font-size:0.75rem;color:#888;margin-bottom:4px;">⚠️ Points faibles</div>
-                {"".join(f'<div style="font-size:0.85rem;margin-bottom:3px;">• {p}</div>' for p in ppf[:2])}
-                <div style="font-size:0.75rem;color:#888;margin-top:8px;margin-bottom:4px;">💡 Pour Insolit</div>
-                {"".join(f'<div style="font-size:0.85rem;margin-bottom:3px;">• {o}</div>' for o in opps[:2])}
-            </div>
-        </div>
-        <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid #1a1a1a;color:#aaa;font-style:italic;font-size:0.9rem;">
-            {rapport.get("verdict","—")}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # Affichage erreur JSON si le rapport a échoué
+    if rapport.get("_error"):
+        st.error("⚠️ Le rapport IA n'a pas pu être généré correctement. Les données brutes des vidéos sont tout de même sauvegardées.")
+
+    pf_html  = "".join('<div style="font-size:0.85rem;margin-bottom:3px;">• ' + _e(p) + '</div>' for p in pf[:3])
+    ppf_html = "".join('<div style="font-size:0.85rem;margin-bottom:3px;">• ' + _e(p) + '</div>' for p in ppf[:2])
+    opp_html = "".join('<div style="font-size:0.85rem;margin-bottom:3px;">• ' + _e(o) + '</div>' for o in opps[:2])
+
+    fiche_html = (
+        '<div class="fiche-compte">'
+        '<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">'
+        '<div>'
+        '<span style="font-size:1.4rem;font-weight:900;color:#ff00a4;">@' + _e(username) + '</span>'
+        '<span style="color:#555;margin-left:8px;">' + _e(plateforme) + '</span>'
+        '</div>'
+        '<div style="text-align:right;">'
+        '<div style="font-size:0.85rem;color:#888;">' + str(len(analyses)) + ' vidéos analysées</div>'
+        '<div style="font-size:1.1rem;font-weight:700;color:#01f0fc;">Score global : ' + score_display + '/10</div>'
+        '<div style="background:#111;border-radius:4px;height:6px;width:150px;margin-top:4px;">'
+        '<div style="background:linear-gradient(90deg,#0000ff,#ff00a4);width:' + str(score_bar) + '%;height:6px;border-radius:4px;"></div>'
+        '</div>'
+        '</div>'
+        '</div>'
+        '<div style="margin-top:1rem;display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;">'
+        '<div>'
+        '<div style="font-size:0.7rem;color:#555;text-transform:uppercase;letter-spacing:1px;">Style</div>'
+        '<div style="color:#01f0fc;font-size:0.9rem;">' + _e(resume.get("style_visuel_dominant")) + '</div>'
+        '<div style="font-size:0.7rem;color:#555;margin-top:8px;text-transform:uppercase;letter-spacing:1px;">Ton</div>'
+        '<div style="color:#01f0fc;font-size:0.9rem;">' + _e(resume.get("ton_editorial")) + '</div>'
+        '</div>'
+        '<div>'
+        '<div style="font-size:0.75rem;color:#888;margin-bottom:4px;">✅ Points forts</div>'
+        + pf_html +
+        '</div>'
+        '<div>'
+        '<div style="font-size:0.75rem;color:#888;margin-bottom:4px;">⚠️ Points faibles</div>'
+        + ppf_html +
+        '<div style="font-size:0.75rem;color:#888;margin-top:8px;margin-bottom:4px;">💡 Pour Insolit</div>'
+        + opp_html +
+        '</div>'
+        '</div>'
+        '<div style="margin-top:1rem;padding-top:1rem;border-top:1px solid #1a1a1a;color:#aaa;font-style:italic;font-size:0.9rem;">'
+        + _e(rapport.get("verdict")) +
+        '</div>'
+        '</div>'
+    )
+    st.markdown(fiche_html, unsafe_allow_html=True)
 
     # ── BLOC 2 — Top vidéos ───────────────────────────────────────────────────
     meilleures = rapport.get("meilleures_videos", [])
@@ -654,33 +680,35 @@ if "last_compte_analysis" in st.session_state:
                     shot = os.path.join(SCREENSHOTS_PATH, str(vid_id), "plan_01.jpg")
                     if os.path.exists(shot):
                         st.image(shot, use_container_width=True)
-                st.markdown(f"""
-                <div class="card card-pink">
-                    <div style="font-weight:700;font-size:0.9rem;color:#ff00a4;">#{i+1}</div>
-                    <div style="font-size:0.85rem;margin:4px 0;">{v.get("titre","—")[:60]}</div>
-                    <div style="color:#888;font-size:0.8rem;margin-top:6px;">
-                        <strong style="color:#01f0fc;">Pourquoi ça marche :</strong><br>
-                        {v.get("pourquoi_ca_marche","—")}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                card_html = (
+                    '<div class="card card-pink">'
+                    '<div style="font-weight:700;font-size:0.9rem;color:#ff00a4;">#' + str(i+1) + '</div>'
+                    '<div style="font-size:0.85rem;margin:4px 0;">' + _e(v.get("titre","—"))[:80] + '</div>'
+                    '<div style="color:#888;font-size:0.8rem;margin-top:6px;">'
+                    '<strong style="color:#01f0fc;">Pourquoi ça marche :</strong><br>'
+                    + _e(v.get("pourquoi_ca_marche","—")) +
+                    '</div>'
+                    '</div>'
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
                 repro = v.get("elements_reproductibles", [])
                 if repro:
                     for r in repro[:2]:
-                        st.markdown(f"✅ {r}")
+                        st.markdown("✅ " + str(r))
 
     # ── BLOC 3 — Patterns gagnants ────────────────────────────────────────────
     patterns = rapport.get("patterns_gagnants", [])
     if patterns:
         st.markdown("### 🔁 Patterns gagnants du compte")
         for p in patterns[:5]:
-            st.markdown(f"""
-            <div class="card card-blue">
-                <strong style="color:#01f0fc;">{p.get("pattern","—")}</strong>
-                <span style="color:#555;margin-left:12px;font-size:0.8rem;">{p.get("frequence","")}</span><br>
-                <span style="color:#888;font-size:0.85rem;">Impact : {p.get("impact_estime","—")}</span>
-            </div>
-            """, unsafe_allow_html=True)
+            p_html = (
+                '<div class="card card-blue">'
+                '<strong style="color:#01f0fc;">' + _e(p.get("pattern","—")) + '</strong>'
+                '<span style="color:#555;margin-left:12px;font-size:0.8rem;">' + _e(p.get("frequence","")) + '</span><br>'
+                '<span style="color:#888;font-size:0.85rem;">Impact : ' + _e(p.get("impact_estime","—")) + '</span>'
+                '</div>'
+            )
+            st.markdown(p_html, unsafe_allow_html=True)
 
     # ── BLOC 4 — Hooks qui marchent ───────────────────────────────────────────
     hooks = rapport.get("hooks_qui_marchent", [])
@@ -698,18 +726,18 @@ if "last_compte_analysis" in st.session_state:
             mecanique      = h.get("mecanique") or h.get("pourquoi", "")
             ce_qui_manque  = h.get("ce_qui_manque", "")
 
-            # Lignes optionnelles
+            # Lignes optionnelles — html.escape sur tous les champs Claude
             rows_html = ""
             if visuel:
-                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">👁 VISUEL</span><br><span style="font-size:0.85em;">' + visuel + '</span></div>'
+                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">👁 VISUEL</span><br><span style="font-size:0.85em;">' + _e(visuel) + '</span></div>'
             if auditif:
-                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">🔊 AUDITIF</span><br><span style="font-size:0.85em;">' + auditif + '</span></div>'
+                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">🔊 AUDITIF</span><br><span style="font-size:0.85em;">' + _e(auditif) + '</span></div>'
             if texte_ecran and texte_ecran.lower() not in ("aucun", "none", ""):
-                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">📝 TEXTE ÉCRAN</span><br><span style="font-size:0.85em;font-weight:600;">' + texte_ecran + '</span></div>'
+                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">📝 TEXTE ÉCRAN</span><br><span style="font-size:0.85em;font-weight:600;">' + _e(texte_ecran) + '</span></div>'
             if mecanique:
-                rows_html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid #1a1a1a;"><span style="color:#ff00a4;font-size:0.78em;font-weight:700;">⚡ POURQUOI ÇA ACCROCHE</span><br><span style="font-size:0.85em;">' + mecanique + '</span></div>'
+                rows_html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid #1a1a1a;"><span style="color:#ff00a4;font-size:0.78em;font-weight:700;">⚡ POURQUOI ÇA ACCROCHE</span><br><span style="font-size:0.85em;">' + _e(mecanique) + '</span></div>'
             if ce_qui_manque:
-                rows_html += '<div style="margin-top:4px;"><span style="color:#888;font-size:0.78em;">⚠️ CE QUI MANQUE</span><br><span style="font-size:0.82em;color:#666;">' + ce_qui_manque + '</span></div>'
+                rows_html += '<div style="margin-top:4px;"><span style="color:#888;font-size:0.78em;">⚠️ CE QUI MANQUE</span><br><span style="font-size:0.82em;color:#666;">' + _e(ce_qui_manque) + '</span></div>'
 
             st.markdown(
                 '<div style="background:#0a0a0a;border:1px solid #222;border-left:3px solid ' + score_color + ';'
@@ -718,7 +746,7 @@ if "last_compte_analysis" in st.session_state:
                 '<span style="font-size:0.75em;color:#555;text-transform:uppercase;letter-spacing:1px;">HOOK</span>'
                 '<span style="font-size:1.1rem;font-weight:900;color:' + score_color + ';">' + str(score_h) + '/10</span>'
                 '</div>'
-                '<div style="font-style:italic;font-size:0.9em;color:#ddd;margin-bottom:10px;">«' + hook_complet + '»</div>'
+                '<div style="font-style:italic;font-size:0.9em;color:#ddd;margin-bottom:10px;">«' + _e(hook_complet) + '»</div>'
                 + rows_html +
                 '</div>',
                 unsafe_allow_html=True,
@@ -818,6 +846,19 @@ if "last_compte_analysis" in st.session_state:
 
             return "\n".join(lines)
 
+        # Pre-check quelles vidéos ont une transcription Whisper
+        from modules.database import Transcription as _TransModel
+        _all_vid_ids = [a.get("video_id") for a in analyses_sorted if a.get("video_id")]
+        _sess_check = get_session()
+        try:
+            _vids_with_transcript = set(
+                r[0] for r in _sess_check.query(_TransModel.video_id).filter(
+                    _TransModel.video_id.in_(_all_vid_ids)
+                ).distinct().all()
+            )
+        finally:
+            _sess_check.close()
+
         cols = st.columns(3)
         for idx, a in enumerate(analyses_sorted):
             col = cols[idx % 3]
@@ -829,34 +870,38 @@ if "last_compte_analysis" in st.session_state:
                 else:
                     st.markdown('<div style="background:#111;height:100px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#333;font-size:1.5rem;">🎬</div>', unsafe_allow_html=True)
 
-                vues    = a.get("vues")
+                vues     = a.get("vues")
                 vues_str = f"{vues:,}" if vues else "—"
-                score_v = a.get("score_potentiel", "—")
-                titre_v = (a.get("titre") or "—")
+                score_v  = a.get("score_potentiel", "—")
+                titre_v  = str(a.get("titre") or "—")
+                hook_txt = str(a.get("hook_texte") or "")
                 st.markdown(
                     '<div style="padding:0.4rem 0;">'
-                    '<div style="font-size:0.85rem;font-weight:600;">' + titre_v[:45] + '</div>'
+                    '<div style="font-size:0.85rem;font-weight:600;">' + _e(titre_v[:45]) + '</div>'
                     '<div style="color:#888;font-size:0.78rem;margin-top:2px;">👁 ' + vues_str + ' · Score ' + str(score_v) + '/10</div>'
-                    '<div style="color:#555;font-size:0.78rem;font-style:italic;">' + (a.get("hook_texte") or "")[:50] + '</div>'
+                    '<div style="color:#555;font-size:0.78rem;font-style:italic;">' + _e(hook_txt[:50]) + '</div>'
                     '</div>',
                     unsafe_allow_html=True,
                 )
 
-                # Accordéon transcript
-                with st.expander("▶ Voir le script transcrit"):
-                    mots_db, plans_db = _load_transcript(vid_id)
-                    script_txt = _render_transcript(mots_db, plans_db, titre_v)
-                    if script_txt:
-                        st.text(script_txt)
-                        st.button(
-                            "📋 Copier ce script",
-                            key="copy_script_" + str(vid_id) + "_" + str(idx),
-                            on_click=lambda t=script_txt: st.session_state.update({"_copied_script": t}),
-                        )
-                        if st.session_state.get("_copied_script") == script_txt:
-                            st.code(script_txt, language="")
-                    else:
-                        st.caption("Transcription non disponible pour cette vidéo — relancer l'analyse pour l'obtenir.")
+                # Accordéon transcript — seulement si données Whisper présentes
+                if vid_id in _vids_with_transcript:
+                    with st.expander("▶ Voir le script transcrit"):
+                        mots_db, plans_db = _load_transcript(vid_id)
+                        script_txt = _render_transcript(mots_db, plans_db, titre_v)
+                        if script_txt:
+                            st.text(script_txt)
+                            st.button(
+                                "📋 Copier ce script",
+                                key="copy_script_" + str(vid_id) + "_" + str(idx),
+                                on_click=lambda t=script_txt: st.session_state.update({"_copied_script": t}),
+                            )
+                            if st.session_state.get("_copied_script") == script_txt:
+                                st.code(script_txt, language="")
+                        else:
+                            st.caption("Script structuré non disponible pour cette vidéo.")
+                else:
+                    st.caption("🔇 Pas de transcription audio — configurez OPENAI_API_KEY sur Railway pour activer Whisper.")
 
     # ── BLOC 6 — Comparaison avec ta base ────────────────────────────────────
     all_my_videos = get_all_videos_with_stats()
