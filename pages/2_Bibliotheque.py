@@ -11,38 +11,6 @@ st.set_page_config(page_title="Bibliothèque — Insolit Studio", page_icon="�
 from modules.styles import apply_styles
 apply_styles()
 
-# ─── Couleurs de performance ──────────────────────────────────────────────────
-PERF_BORDER = {
-    "viral":   "#00C853",
-    "bon":     "#2196F3",
-    "moyen":   "#FF9800",
-    "mauvais": "#F44336",
-}
-PERF_LABEL_MAP = {
-    "viral":   "🔥 Viral",
-    "bon":     "✅ Bon",
-    "moyen":   "😐 Moyen",
-    "mauvais": "❌ Mauvais",
-}
-PERF_TEXT_COLOR = {
-    "viral":   "#000",
-    "bon":     "#fff",
-    "moyen":   "#000",
-    "mauvais": "#fff",
-}
-
-# Couleurs placeholder par catégorie
-CAT_COLORS = {
-    "Restaurant":    "#E65100",
-    "Bar":           "#7B1FA2",
-    "Café":          "#5D4037",
-    "Expérience":    "#1565C0",
-    "Bon plan":      "#2E7D32",
-    "Tendance food": "#AD1457",
-    "Lifestyle":     "#4527A0",
-    "Voyage IDF":    "#00695C",
-    "Autre":         "#37474F",
-}
 
 st.markdown("""
 <style>
@@ -113,20 +81,9 @@ st.markdown("""
 
 st.markdown('<h1 style="color:#ff00a4;font-weight:900;">📚 Ma bibliothèque</h1>', unsafe_allow_html=True)
 
-from modules.database import get_all_videos_with_stats, get_precision_level, delete_video, get_session, Stats
+from modules.database import get_all_videos_with_stats, get_precision_level, delete_video
 from modules.enrichment import get_precision_badge
-
-
-def _get_engagement_ratios(vid_id):
-    """Retourne (taux_engagement, ratio_saves, ratio_shares) depuis la DB."""
-    sess = get_session()
-    try:
-        s = sess.query(Stats).filter_by(video_id=vid_id).first()
-        if s:
-            return s.taux_engagement, s.ratio_saves, s.ratio_shares
-        return None, None, None
-    finally:
-        sess.close()
+from modules.constants import PERF_BORDER, PERF_LABEL_MAP, PERF_TEXT_COLOR, CAT_COLORS
 
 
 def _engagement_line(taux_eng, r_saves, r_shares):
@@ -402,8 +359,11 @@ if view_mode == "Liste":
             with cols[offset + 2]:
                 vues = video.get("vues") or 0
                 st.markdown("👁 **" + f"{vues:,}" + "**" if vues else "👁 —")
-                taux_eng, r_saves, r_shares = _get_engagement_ratios(vid_id)
-                eng_line = _engagement_line(taux_eng, r_saves, r_shares)
+                eng_line = _engagement_line(
+                    video.get("taux_engagement"),
+                    video.get("ratio_saves"),
+                    video.get("ratio_shares"),
+                )
                 if eng_line:
                     st.caption(eng_line)
 
@@ -466,8 +426,11 @@ else:
             perf_badge = _perf_badge_html(perf)
             vues_str   = (str(video.get("vues", 0)) + "v") if video.get("vues") else ""
             annote_badge = '<span class="badge-done">✓ Annoté</span>' if perf else '<span class="badge-annotate">⚡ À annoter</span>'
-            taux_eng_g, r_saves_g, r_shares_g = _get_engagement_ratios(vid_id)
-            eng_line_g = _engagement_line(taux_eng_g, r_saves_g, r_shares_g)
+            eng_line_g = _engagement_line(
+                video.get("taux_engagement"),
+                video.get("ratio_saves"),
+                video.get("ratio_shares"),
+            )
             eng_html = ('<div style="margin-top:3px;font-size:0.72rem;color:#888;">' + eng_line_g + '</div>') if eng_line_g else ""
 
             st.markdown(

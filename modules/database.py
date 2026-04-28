@@ -6,7 +6,7 @@ from modules._env import _ROOT  # noqa — charge .env
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, Float, Text,
-    DateTime, Boolean, ForeignKey, JSON
+    DateTime, Boolean, ForeignKey, JSON, Index
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from sqlalchemy.pool import StaticPool
@@ -166,6 +166,12 @@ class Video(Base):
     analyse_creative = relationship("AnalyseCreative", back_populates="video", uselist=False)
     stats = relationship("Stats", back_populates="video", uselist=False)
 
+    __table_args__ = (
+        Index("idx_video_statut",    "statut_analyse"),
+        Index("idx_video_type_src",  "type_source"),
+        Index("idx_video_created",   "created_at"),
+    )
+
 
 class AnalysePegasus(Base):
     __tablename__ = "analyse_pegasus"
@@ -280,6 +286,10 @@ class Stats(Base):
 
     video = relationship("Video", back_populates="stats")
 
+    __table_args__ = (
+        Index("idx_stats_perf_tag", "performance_tag"),
+    )
+
 
 class TopCommentaire(Base):
     """Amélioration 4 — Top commentaires des vidéos virales."""
@@ -372,10 +382,16 @@ def get_precision_level():
 
 
 def get_all_videos_with_stats():
+    from sqlalchemy.orm import joinedload
     session = get_session()
     try:
         videos = (
             session.query(Video)
+            .options(
+                joinedload(Video.analyse_pegasus),
+                joinedload(Video.analyse_creative),
+                joinedload(Video.stats),
+            )
             .filter(Video.statut_analyse == "complete")
             .order_by(Video.created_at.desc())
             .all()
@@ -412,6 +428,10 @@ def get_all_videos_with_stats():
                     "vues": v.stats.vues,
                     "performance_tag": v.stats.performance_tag,
                     "completion_rate": v.stats.completion_rate,
+                    # Ratios engagement directement dans le dict — évite N+1 dans Bibliothèque
+                    "taux_engagement": v.stats.taux_engagement,
+                    "ratio_saves": v.stats.ratio_saves,
+                    "ratio_shares": v.stats.ratio_shares,
                 })
             result.append(d)
         return result

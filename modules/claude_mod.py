@@ -181,25 +181,36 @@ def analyze_frames_with_vision(
     client = _get_client()
 
     # Construction du message multimodal
+    # Le bloc d'instructions statiques est mis en cache (cache_control) → -90% coût après 1er appel
     content = []
+    _static_instructions = (
+        "OBJECTIF : Détecter TOUS les plans, leur structure narrative et les changements de scène.\n\n"
+        "RÈGLES ABSOLUES :\n"
+        "1. PLANS : Chaque frame = UN plan distinct. NE JAMAIS fusionner.\n"
+        "2. TEXTE OVERLAY : Copie MOT POUR MOT tout texte visible (overlay, sous-titres, prix, adresses, emojis).\n"
+        "   → Prix visibles (6,99€ / 12€ / -50%) → texte_visible_ecran OBLIGATOIRE.\n"
+        "   → Aucun texte → null (jamais string vide).\n"
+        "3. HOOK : Plan 1 = les premières secondes critiques. role_narratif='hook'. Analyse le texte ET l'image finement.\n"
+        "4. CHANGEMENT DE SCÈNE : changement_scene=true si nouveau lieu OU nouvelle personne apparaît vs plan précédent.\n"
+        "   → Ex: on passe de l'extérieur à l'intérieur → true. Nouveau personnage cadré → true.\n"
+        "5. PERSONNES : décris qui est à l'écran ('1 homme qui parle', 'groupe de 3 personnes', 'pas de personne').\n"
+        "6. SUJET PRINCIPAL : sois précis — 'Homme 30 ans face caméra, restaurant en arrière-plan, nouveau lieu vs plan 1'.\n"
+        "7. TIMESTAMPS : utilise exactement les timestamps fournis.\n"
+        "8. structure_narrative dans metriques = UNE STRING (pas un objet).\n\n"
+        "FORMAT JSON ATTENDU :\n" + _VISION_JSON_STRUCTURE
+    )
+    content.append({
+        "type": "text",
+        "text": _static_instructions,
+        "cache_control": {"type": "ephemeral"},
+    })
     content.append({
         "type": "text",
         "text": (
             f"Vidéo TikTok/Instagram de {video_duration:.0f} secondes. "
-            f"Voici {len(frames)} frames extraites à intervalles réguliers.\n"
-            "OBJECTIF : Détecter TOUS les plans, leur structure narrative et les changements de scène.\n\n"
-            "RÈGLES ABSOLUES :\n"
-            f"1. PLANS : Chaque frame = UN plan distinct. NE JAMAIS fusionner. Retourne exactement {len(frames)} objets.\n"
-            "2. TEXTE OVERLAY : Copie MOT POUR MOT tout texte visible (overlay, sous-titres, prix, adresses, emojis).\n"
-            "   → Prix visibles (6,99€ / 12€ / -50%) → texte_visible_ecran OBLIGATOIRE.\n"
-            "   → Aucun texte → null (jamais string vide).\n"
-            "3. HOOK : Plan 1 = les premières secondes critiques. role_narratif='hook'. Analyse le texte ET l'image finement.\n"
-            "4. CHANGEMENT DE SCÈNE : changement_scene=true si nouveau lieu OU nouvelle personne apparaît vs plan précédent.\n"
-            "   → Ex: on passe de l'extérieur à l'intérieur → true. Nouveau personnage cadré → true.\n"
-            "5. PERSONNES : décris qui est à l'écran ('1 homme qui parle', 'groupe de 3 personnes', 'pas de personne').\n"
-            "6. SUJET PRINCIPAL : sois précis — 'Homme 30 ans face caméra, restaurant en arrière-plan, nouveau lieu vs plan 1'.\n"
-            "7. TIMESTAMPS : utilise exactement les timestamps fournis.\n"
-            "8. structure_narrative dans metriques = UNE STRING (pas un objet)."
+            f"Voici {len(frames)} frames extraites à intervalles réguliers. "
+            f"Retourne exactement {len(frames)} objets dans le tableau plans (1 par frame). "
+            "Retourne UNIQUEMENT le JSON valide, sans markdown ni explication."
         )
     })
 
@@ -217,32 +228,49 @@ def analyze_frames_with_vision(
             }
         })
 
-    content.append({
-        "type": "text",
-        "text": (
-            f"\nRetourne UNIQUEMENT ce JSON valide (sans markdown, sans explication) "
-            f"en utilisant exactement les timestamps fournis :\n{_VISION_JSON_STRUCTURE}"
-        )
-    })
-
     try:
         # ~500 tokens output par frame + 1000 overhead (plans verbeux + hook + metriques)
         # 12 frames → 7000 tokens → largement au-dessus du plafond de troncature
         # claude-haiku-4-5 supporte jusqu'à 8192 output tokens
         max_tok = min(8192, max(3000, len(frames) * 500 + 1000))
-        response = client.messages.create(
-            model=MODEL_FAST,
-            max_tokens=max_tok,
-            messages=[{"role": "user", "content": content}],
-        )
+        try:
+            response = client.beta.messages.create(
+                model=MODEL_FAST,
+                max_tokens=max_tok,
+                messages=[{"role": "user", "content": content}],
+                betas=["prompt-caching-2024-07-31"],
+            )
+        except Exception:
+            # Fallback sans caching si beta non dispo
+            content_no_cache = [
+                {k: v for k, v in blk.items() if k != "cache_control"} for blk in content
+            ]
+            response = client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=max_tok,
+                messages=[{"role": "user", "content": content_no_cache}],
+            )
 
         raw_text = response.content[0].text
         p = PRICES[MODEL_FAST]
-        in_tok  = response.usage.input_tokens
-        out_tok = response.usage.output_tokens
-        cost    = round((in_tok * p["in"] + out_tok * p["out"]) / 1_000_000, 5)
+        in_tok       = response.usage.input_tokens
+        out_tok      = response.usage.output_tokens
+        cache_write  = getattr(response.usage, "cache_creation_input_tokens", 0)
+        cache_read   = getattr(response.usage, "cache_read_input_tokens", 0)
+        cost = round(
+            (in_tok * p["in"] + out_tok * p["out"] +
+             cache_write * p.get("cache_write", p["in"]) +
+             cache_read  * p.get("cache_read", p["in"] * 0.1)) / 1_000_000,
+            5
+        )
 
-        usage = {"input_tokens": in_tok, "output_tokens": out_tok, "model": MODEL_FAST, "cout_estime": cost}
+        usage = {
+            "input_tokens": in_tok, "output_tokens": out_tok,
+            "cache_write_tokens": cache_write, "cache_read_tokens": cache_read,
+            "model": MODEL_FAST, "cout_estime": cost,
+        }
+        if cache_read:
+            logger.info(f"Vision cache hit! {cache_read} tokens lus du cache")
         logger.info(f"Vision (Haiku): {in_tok}in/{out_tok}out = ${cost:.5f}")
 
         parsed = _parse_pegasus_response(raw_text)

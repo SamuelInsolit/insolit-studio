@@ -529,9 +529,9 @@ with col_result:
             if st.button("📋 Copier", use_container_width=True):
                 st.code(brief_text, language="")
         with col_b:
-            wa_preview   = brief_text[:500] + "..."
-            wa_encoded   = wa_preview.replace(" ", "%20").replace("\n", "%0A")
-            wa_url       = "https://wa.me/?text=" + wa_encoded
+            wa_preview = brief_text[:500] + "..."
+            import urllib.parse as _up
+            wa_url     = "https://wa.me/?text=" + _up.quote(wa_preview, safe="")
             st.link_button("📱 WhatsApp", url=wa_url, use_container_width=True)
         with col_c:
             st.button("💾 Sauvegardé ✓", disabled=True, use_container_width=True)

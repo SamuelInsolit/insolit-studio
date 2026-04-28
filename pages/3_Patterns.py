@@ -79,7 +79,7 @@ if nb_annotees < 10:
             st.markdown("#### Vidéos de référence annotées")
             for v in annotated_preview[:5]:
                 perf = v.get("performance_tag", "")
-                COLORS = {"viral": "#00C853", "bon": "#2196F3", "moyen": "#FF9800", "mauvais": "#F44336"}
+                from modules.constants import PERF_BORDER as COLORS
                 c = COLORS.get(perf, "#555")
                 import html as _h
                 t = _h.escape(v.get("titre") or "Sans titre")

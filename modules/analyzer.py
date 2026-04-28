@@ -249,7 +249,7 @@ def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
         t_end   = timestamps[i + 1]
         t_mid   = round((t_start + t_end) / 2, 2)
 
-        frame_path = f"/tmp/insolit_f{i:02d}.jpg"
+        frame_path = f"/tmp/insolit_{os.getpid()}_{i:02d}.jpg"
         cmd = [
             FFMPEG_BIN, "-y",
             "-ss", str(t_mid),

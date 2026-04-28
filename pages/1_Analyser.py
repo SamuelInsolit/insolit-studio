@@ -409,13 +409,17 @@ if "last_analysis" in st.session_state:
         categorie_val = st.session_state["last_analysis_meta"].get("categorie", "")
 
     from modules.database import find_matching_kb_resources
-    with st.spinner("📚 Recherche dans ta base de connaissances..."):
-        kb_matches = find_matching_kb_resources(
-            hook_type=hook_type_val,
-            categorie=categorie_val,
-            hook_texte=hook_text_val,
-            limit=3,
-        )
+    # Clé de cache : (video_id, hook_type, hook_text) — évite re-appel API sur chaque rerender
+    _kb_cache_key = f"kb_matches_{result.get('video_id','?')}_{hook_type_val}_{hook_text_val[:30]}"
+    if _kb_cache_key not in st.session_state:
+        with st.spinner("📚 Recherche dans ta base de connaissances..."):
+            st.session_state[_kb_cache_key] = find_matching_kb_resources(
+                hook_type=hook_type_val,
+                categorie=categorie_val,
+                hook_texte=hook_text_val,
+                limit=3,
+            )
+    kb_matches = st.session_state[_kb_cache_key]
 
     if kb_matches:
         st.markdown("### 📚 Ta Base de Connaissances dit...")
@@ -449,14 +453,17 @@ if "last_analysis" in st.session_state:
                 badge_color = "#888"
                 badge_bg    = "#0a0a0a"
 
-            # Comparaison Claude (Haiku, ~$0.001)
-            comparison = compare_video_to_kb_resource(
-                video_hook_type=hook_type_val,
-                video_hook_text=hook_text_val,
-                video_score=float(creative.get("score_potentiel") or 5),
-                video_categorie=categorie_val,
-                resource=match,
-            )
+            # Comparaison Claude (Haiku, ~$0.001) — mise en cache session_state pour éviter re-appel
+            _cmp_key = f"kb_cmp_{result.get('video_id','?')}_{match.get('id','?')}"
+            if _cmp_key not in st.session_state:
+                st.session_state[_cmp_key] = compare_video_to_kb_resource(
+                    video_hook_type=hook_type_val,
+                    video_hook_text=hook_text_val,
+                    video_score=float(creative.get("score_potentiel") or 5),
+                    video_categorie=categorie_val,
+                    resource=match,
+                )
+            comparison = st.session_state[_cmp_key]
             points_communs = comparison.get("points_communs", [])
             differences    = comparison.get("differences", [])
             conseil        = comparison.get("conseil_cle", "")
