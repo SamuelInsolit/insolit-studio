@@ -125,7 +125,9 @@ _VISION_JSON_STRUCTURE = """{
       "timestamp_debut": 0.0,
       "timestamp_fin": 3.0,
       "type_plan": "macro_plat|plan_moyen|plan_large|visage|texte_ecran|action|transition",
-      "sujet_principal": "ce qu'on voit",
+      "sujet_principal": "description précise: qui, quoi, où — ce qui change vs plan précédent",
+      "personnes": "1 homme|1 femme|groupe|narrateur seul|pas de personne",
+      "changement_scene": false,
       "luminosite": 7,
       "type_lumiere": "naturelle_chaude|naturelle_froide|artificielle|mixte",
       "mouvement_camera": "statique|travelling|zoom_in|zoom_out|shake",
@@ -137,8 +139,7 @@ _VISION_JSON_STRUCTURE = """{
       "emotion_transmise": "appétissant|excitant|neutre|drôle",
       "role_narratif": "hook|contexte|preuve|ambiance|cta|branding",
       "points_forts": ["point"],
-      "suggestion_amelioration": "suggestion",
-      "scene_change_type": "cut|transition|fade|zoom|pan"
+      "suggestion_amelioration": "suggestion"
     }
   ],
   "hook_analyse": {
@@ -186,16 +187,19 @@ def analyze_frames_with_vision(
         "text": (
             f"Vidéo TikTok/Instagram de {video_duration:.0f} secondes. "
             f"Voici {len(frames)} frames extraites à intervalles réguliers.\n"
-            "OBJECTIF : Détecter TOUS les plans et analyser la structure créative complète.\n\n"
+            "OBJECTIF : Détecter TOUS les plans, leur structure narrative et les changements de scène.\n\n"
             "RÈGLES ABSOLUES :\n"
-            f"1. PLANS : Chaque frame = UN plan distinct dans le JSON. NE JAMAIS fusionner deux frames.\n"
-            f"   → Tu dois retourner exactement {len(frames)} objets dans 'plans'.\n"
-            "2. TEXTE : Copie MOT POUR MOT tout texte visible (overlay, sous-titres, prix, adresses, emojis hashtags).\n"
-            "   → Si prix visible (ex: 6,99€ / 12€ / -50%) → note dans texte_visible_ecran OBLIGATOIREMENT.\n"
-            "   → Si aucun texte → null (pas une string vide).\n"
-            "3. HOOK : Les 3 premières secondes sont critiques — analyse finement le texte ET l'image du plan 1.\n"
-            "4. TIMESTAMPS : Utilise exactement les timestamps fournis (ne les invente pas).\n"
-            "5. structure_narrative dans metriques doit être UNE STRING (pas un objet JSON)."
+            f"1. PLANS : Chaque frame = UN plan distinct. NE JAMAIS fusionner. Retourne exactement {len(frames)} objets.\n"
+            "2. TEXTE OVERLAY : Copie MOT POUR MOT tout texte visible (overlay, sous-titres, prix, adresses, emojis).\n"
+            "   → Prix visibles (6,99€ / 12€ / -50%) → texte_visible_ecran OBLIGATOIRE.\n"
+            "   → Aucun texte → null (jamais string vide).\n"
+            "3. HOOK : Plan 1 = les premières secondes critiques. role_narratif='hook'. Analyse le texte ET l'image finement.\n"
+            "4. CHANGEMENT DE SCÈNE : changement_scene=true si nouveau lieu OU nouvelle personne apparaît vs plan précédent.\n"
+            "   → Ex: on passe de l'extérieur à l'intérieur → true. Nouveau personnage cadré → true.\n"
+            "5. PERSONNES : décris qui est à l'écran ('1 homme qui parle', 'groupe de 3 personnes', 'pas de personne').\n"
+            "6. SUJET PRINCIPAL : sois précis — 'Homme 30 ans face caméra, restaurant en arrière-plan, nouveau lieu vs plan 1'.\n"
+            "7. TIMESTAMPS : utilise exactement les timestamps fournis.\n"
+            "8. structure_narrative dans metriques = UNE STRING (pas un objet)."
         )
     })
 

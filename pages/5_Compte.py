@@ -742,75 +742,69 @@ if "compte_preview" in st.session_state:
             }
 
             try:
-                result = analyze_video(source=url_video, metadata=metadata, is_url=True)
+                # Mode pires → quick_mode (5 frames au lieu de 12) = ~50% moins cher
+                use_quick = (mode_analyse == "pires") or vid.get("_mode_pires", False)
+                result = analyze_video(
+                    source=url_video, metadata=metadata,
+                    is_url=True, quick_mode=use_quick
+                )
                 if result.get("success"):
                     from modules.database import Stats, Video as _VideoModel, compute_engagement_ratios
 
-                    # Stats + annotation auto selon mode
-                    if vid.get("vues") or vid.get("likes"):
-                        sess = get_session()
-                        try:
+                    # ── Session unique : Stats + Video (jour, son) ───────────
+                    _JOURS = {
+                        "Monday": "lundi", "Tuesday": "mardi",
+                        "Wednesday": "mercredi", "Thursday": "jeudi",
+                        "Friday": "vendredi", "Saturday": "samedi",
+                        "Sunday": "dimanche"
+                    }
+                    sess_all = get_session()
+                    try:
+                        # Stats + annotation auto selon mode
+                        if vid.get("vues") or vid.get("likes"):
                             stats = Stats(
                                 video_id=result["video_id"],
                                 vues=vid.get("vues"),
                                 likes=vid.get("likes"),
                                 comments=vid.get("comments"),
                             )
-                            # Tag selon le mode
-                            if vid.get("_mode_pires"):
-                                stats.performance_tag = "mauvais"
-                            else:
-                                stats.performance_tag = _auto_tag(vid, mode_analyse)
-
+                            stats.performance_tag = (
+                                "mauvais" if vid.get("_mode_pires")
+                                else _auto_tag(vid, mode_analyse)
+                            )
                             compute_engagement_ratios(stats)
-                            sess.add(stats)
-                            sess.commit()
-                        finally:
-                            sess.close()
+                            sess_all.add(stats)
 
-                    # Jour de publication
-                    date_str = vid.get("date", "")
-                    if date_str and len(date_str) == 8:
-                        try:
-                            from datetime import datetime as _dt
-                            d = _dt.strptime(date_str, "%Y%m%d")
-                            _JOURS = {
-                                "Monday": "lundi", "Tuesday": "mardi",
-                                "Wednesday": "mercredi", "Thursday": "jeudi",
-                                "Friday": "vendredi", "Saturday": "samedi",
-                                "Sunday": "dimanche"
-                            }
-                            jour_fr = _JOURS.get(d.strftime("%A"), d.strftime("%A").lower())
-                            sess2 = get_session()
-                            try:
-                                video_obj = sess2.query(_VideoModel).filter_by(
-                                    id=result["video_id"]
-                                ).first()
-                                if video_obj:
-                                    video_obj.jour_publication = jour_fr
-                                    sess2.commit()
-                            finally:
-                                sess2.close()
-                        except Exception as exc2:
-                            logger.warning("jour_publication: " + str(exc2))
+                        # Mise à jour Video (jour + son) en un seul .get()
+                        video_obj = sess_all.query(_VideoModel).filter_by(
+                            id=result["video_id"]
+                        ).first()
+                        if video_obj:
+                            # Jour de publication
+                            date_str = vid.get("date", "")
+                            if date_str and len(date_str) == 8:
+                                try:
+                                    from datetime import datetime as _dt
+                                    d = _dt.strptime(date_str, "%Y%m%d")
+                                    video_obj.jour_publication = _JOURS.get(
+                                        d.strftime("%A"), d.strftime("%A").lower()
+                                    )
+                                except Exception as exc2:
+                                    logger.warning("jour_publication: " + str(exc2))
+                            # Son/musique
+                            music_track  = vid.get("music_track", "")
+                            music_author = vid.get("music_author", "")
+                            if music_track or music_author:
+                                video_obj.nom_son      = str(music_track)[:500]  if music_track  else ""
+                                video_obj.auteur_son   = str(music_author)[:200] if music_author else ""
+                                video_obj.son_original = bool(vid.get("is_original_sound", False))
 
-                    # Son/musique
-                    music_track  = vid.get("music_track", "")
-                    music_author = vid.get("music_author", "")
-                    is_orig      = vid.get("is_original_sound", False)
-                    if music_track or music_author:
-                        sess3 = get_session()
-                        try:
-                            video_obj3 = sess3.query(_VideoModel).filter_by(
-                                id=result["video_id"]
-                            ).first()
-                            if video_obj3:
-                                video_obj3.nom_son    = str(music_track)[:500] if music_track else ""
-                                video_obj3.auteur_son = str(music_author)[:200] if music_author else ""
-                                video_obj3.son_original = bool(is_orig)
-                                sess3.commit()
-                        finally:
-                            sess3.close()
+                        sess_all.commit()
+                    except Exception as exc_db:
+                        sess_all.rollback()
+                        logger.warning("DB enrichissement vidéo: " + str(exc_db))
+                    finally:
+                        sess_all.close()
 
                     # Commentaires
                     if recuperer_commentaires:
@@ -847,7 +841,7 @@ if "compte_preview" in st.session_state:
                 logger.error("Vidéo " + str(i+1) + " exception: " + str(exc), exc_info=True)
 
             if i < nb_found - 1:
-                time.sleep(3)
+                time.sleep(2)  # 2s suffit — était 3s
 
         progress_global.progress(90)
         video_status.empty()
@@ -1116,6 +1110,7 @@ if "last_compte_analysis" in st.session_state:
         from modules.database import Transcription, Plan as PlanDB
 
         def _load_transcript(video_id):
+            """Charge transcription + plans complets (tous les champs) depuis la DB."""
             if not video_id:
                 return [], []
             sess = get_session()
@@ -1126,41 +1121,102 @@ if "last_compte_analysis" in st.session_state:
                             .order_by(PlanDB.numero_plan).all()
                 return (
                     [{"ts": m.timestamp, "mot": m.mot} for m in mots],
-                    [{"num": p.numero_plan, "debut": p.timestamp_debut,
-                      "fin": p.timestamp_fin, "texte": p.texte_visible or ""} for p in plans],
+                    [{
+                        "num":             p.numero_plan,
+                        "debut":           p.timestamp_debut or 0,
+                        "fin":             p.timestamp_fin or 0,
+                        "type_plan":       p.type_plan or "",
+                        "description":     p.description or "",
+                        "texte":           p.texte_visible or "",
+                        "role":            p.role_narratif or "",
+                        "changement":      bool(p.changement_scene),
+                        "personnes":       p.personnes or "",
+                    } for p in plans],
                 )
             finally:
                 sess.close()
 
-        def _render_transcript(mots, plans, titre):
-            if not mots:
+        def _render_transcript(mots, plans):
+            """
+            Formate la transcription mot-à-mot groupée par plan.
+            Affiche : hook mis en avant, overlay text, changements de scène, personnes.
+            """
+            if not mots and not plans:
                 return None
+
+            SEP = "─" * 48
             lines = []
+
             if plans:
                 for p in plans:
-                    mots_plan = [m["mot"] for m in mots
-                                 if p["debut"] <= m["ts"] <= p["fin"]]
-                    if not mots_plan and not p["texte"]:
-                        continue
-                    lines.append("PLAN " + str(p["num"])
-                                 + " (" + str(round(p["debut"], 1)) + "s–"
-                                 + str(round(p["fin"], 1)) + "s) :")
+                    debut = p["debut"]
+                    fin   = p["fin"]
+                    num   = p["num"]
+                    role  = p["role"]
+                    desc  = p["description"]
+                    texte = p["texte"]
+                    ptype = p["type_plan"]
+                    pers  = p["personnes"]
+
+                    # Indicateur changement de scène
+                    if p["changement"] and num > 1:
+                        lines.append("")
+                        lines.append("⬛ " + SEP)
+                        lines.append("🔄 CHANGEMENT DE SCÈNE")
+                        lines.append("⬛ " + SEP)
+
+                    # En-tête du plan
+                    role_emoji = {
+                        "hook": "🎣 HOOK",
+                        "contexte": "📍 CONTEXTE",
+                        "preuve": "✅ PREUVE",
+                        "ambiance": "🎬 AMBIANCE",
+                        "cta": "📣 CTA",
+                        "branding": "🏷 BRANDING",
+                    }.get(role, "🎬 PLAN")
+
+                    header = (
+                        role_emoji + " " + str(num)
+                        + " (" + str(round(debut, 1)) + "s → " + str(round(fin, 1)) + "s)"
+                    )
+                    if ptype:
+                        header += " | " + ptype
+                    lines.append(header)
+
+                    # Description de la scène
+                    if desc:
+                        lines.append("  👁  " + desc)
+                    if pers and pers not in ("", "na", "None"):
+                        lines.append("  👤  " + pers)
+
+                    # Overlay / texte à l'écran — mis en avant
+                    if texte:
+                        lines.append("  📝  OVERLAY : « " + texte + " »")
+
+                    # Mots prononcés dans ce plan
+                    mots_plan = [m["mot"] for m in mots if debut <= m["ts"] <= fin]
                     if mots_plan:
-                        lines.append('  Texte dit : "' + " ".join(mots_plan) + '"')
-                    if p["texte"]:
-                        lines.append("  Texte écran : " + p["texte"])
+                        lines.append('  🗣  "' + " ".join(mots_plan) + '"')
+                    elif not texte and not desc:
+                        lines.append("  (plan silencieux / pas de texte)")
+
                     lines.append("")
             else:
-                lines.append("MOT PAR MOT :")
+                # Fallback : pas de plans — mot-à-mot brut
+                if not mots:
+                    return None
+                lines.append("🗣 TRANSCRIPTION MOT-À-MOT")
+                lines.append(SEP)
                 chunk = []
                 for m in mots:
                     chunk.append("[" + str(round(m["ts"], 1)) + "s] " + m["mot"])
-                    if len(chunk) >= 10:
+                    if len(chunk) >= 8:
                         lines.append("  " + "  ".join(chunk))
                         chunk = []
                 if chunk:
                     lines.append("  " + "  ".join(chunk))
-            return "\n".join(lines)
+
+            return "\n".join(lines) if lines else None
 
         # Pre-check transcriptions disponibles
         from modules.database import Transcription as _TransModel
@@ -1220,7 +1276,7 @@ if "last_compte_analysis" in st.session_state:
                 if vid_id in _vids_with_transcript:
                     with st.expander("▶ Voir le script transcrit"):
                         mots_db, plans_db = _load_transcript(vid_id)
-                        script_txt = _render_transcript(mots_db, plans_db, titre_v)
+                        script_txt = _render_transcript(mots_db, plans_db)
                         if script_txt:
                             st.text(script_txt)
                             st.button(

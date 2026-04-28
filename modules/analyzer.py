@@ -502,6 +502,8 @@ def analyze_video(
                 role_narratif=_to_str(p.get("role_narratif", "")),
                 points_forts=_to_str(p.get("points_forts", [])),
                 suggestion_amelioration=_to_str(p.get("suggestion_amelioration", "")),
+                changement_scene=bool(p.get("changement_scene", False)),
+                personnes=_to_str(p.get("personnes", "")),
             )
             session.add(plan_obj)
 

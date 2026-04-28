@@ -99,6 +99,22 @@ def _migrate_db(engine):
                     except Exception as e:
                         logger.warning("Migration videos." + col_name + ": " + str(e))
 
+    # Migrations table plans
+    if "plans" in inspector.get_table_names():
+        existing_plans = {col["name"] for col in inspector.get_columns("plans")}
+        new_cols_plans = [
+            ("changement_scene", "BOOLEAN"),
+            ("personnes",        "TEXT"),
+        ]
+        with engine.begin() as conn:
+            for col_name, col_type in new_cols_plans:
+                if col_name not in existing_plans:
+                    try:
+                        conn.execute(text("ALTER TABLE plans ADD COLUMN " + col_name + " " + col_type))
+                        logger.info("Migration: colonne plans." + col_name + " ajoutée")
+                    except Exception as e:
+                        logger.warning("Migration plans." + col_name + ": " + str(e))
+
     # Migrations table stats
     if "stats" in inspector.get_table_names():
         existing_stats = {col["name"] for col in inspector.get_columns("stats")}
@@ -201,6 +217,8 @@ class Plan(Base):
     role_narratif = Column(String(100))
     points_forts = Column(Text)
     suggestion_amelioration = Column(Text)
+    changement_scene = Column(Boolean, default=False)  # nouveau lieu OU nouvelle personne vs plan précédent
+    personnes = Column(String(200))                    # description des personnes à l'écran
 
     video = relationship("Video", back_populates="plans")
 
