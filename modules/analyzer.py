@@ -33,6 +33,44 @@ VOLUME_PATH    = os.getenv("RAILWAY_VOLUME_PATH", "./uploads")
 SCREENSHOTS_PATH = "./screenshots"
 IS_RAILWAY     = os.getenv("RAILWAY_ENVIRONMENT") is not None or os.path.exists("/usr/bin/ffmpeg")
 
+# ── Cookie TikTok/IG pour Railway ────────────────────────────────────────────
+# En local  : --cookies-from-browser chrome (automatique)
+# Railway   : TIKTOK_COOKIES_B64 = contenu cookies.txt encodé en base64
+#             → décodé au premier appel, écrit dans /tmp/tiktok_cookies.txt
+_COOKIES_FILE_CACHE: str | None = None   # chemin résolu, None = pas encore tenté
+
+def get_ytdlp_cookie_args() -> list:
+    """
+    Retourne les args yt-dlp corrects pour l'authentification TikTok/IG.
+    Local   → ['--cookies-from-browser', 'chrome']
+    Railway → ['--cookies', '/tmp/tiktok_cookies.txt']  si TIKTOK_COOKIES_B64 défini
+    Railway → []  sinon (user-agent fallback, marche souvent pour TikTok public)
+    """
+    global _COOKIES_FILE_CACHE
+
+    if not IS_RAILWAY:
+        return ["--cookies-from-browser", "chrome"]
+
+    # Si déjà résolu, on réutilise
+    if _COOKIES_FILE_CACHE:
+        return ["--cookies", _COOKIES_FILE_CACHE]
+
+    b64 = os.getenv("TIKTOK_COOKIES_B64", "").strip()
+    if b64:
+        import base64
+        cookies_path = "/tmp/tiktok_cookies.txt"
+        try:
+            with open(cookies_path, "w") as f:
+                f.write(base64.b64decode(b64).decode("utf-8"))
+            _COOKIES_FILE_CACHE = cookies_path
+            logger.info("Cookies TikTok chargés depuis TIKTOK_COOKIES_B64")
+            return ["--cookies", cookies_path]
+        except Exception as e:
+            logger.warning(f"Impossible de décoder TIKTOK_COOKIES_B64: {e}")
+
+    # Fallback sans cookies — user-agent mobile, marche pour TikTok public
+    return []
+
 
 def _find_bin(name: str) -> str:
     candidates = [
@@ -72,9 +110,9 @@ def download_video(url: str, video_id: int, progress_callback=None) -> str:
     base_cmd    = [YTDLP_BIN, "--no-playlist", "-o", output_path]
 
     if is_tiktok or is_instagram:
-        if not IS_RAILWAY:
-            base_cmd += ["--cookies-from-browser", "chrome"]
-        else:
+        base_cmd += get_ytdlp_cookie_args()
+        if IS_RAILWAY and not os.getenv("TIKTOK_COOKIES_B64"):
+            # Fallback sans cookies : user-agent mobile (TikTok public seulement)
             base_cmd += [
                 "--user-agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
                 "--add-header", "Referer:https://www.tiktok.com/",

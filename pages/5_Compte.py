@@ -20,7 +20,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-from modules.analyzer import YTDLP_BIN, FFMPEG_BIN, FFPROBE_BIN, _ensure_dirs, VOLUME_PATH, SCREENSHOTS_PATH
+from modules.analyzer import (
+    YTDLP_BIN, FFMPEG_BIN, FFPROBE_BIN, _ensure_dirs,
+    VOLUME_PATH, SCREENSHOTS_PATH, IS_RAILWAY, get_ytdlp_cookie_args,
+)
 from modules.database import get_session, get_all_videos_with_stats, get_precision_level
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -44,15 +47,17 @@ def get_account_videos(username: str, platform: str, nb_videos: int, progress_cb
     if progress_cb:
         progress_cb(f"📋 Récupération des {nb_videos} dernières vidéos de @{username}...")
 
-    cmd = [
-        YTDLP_BIN,
-        "--cookies-from-browser", "chrome",
-        "--flat-playlist",
-        "--playlist-end", str(nb_videos),
-        "--print", "%(id)s\t%(title)s\t%(url)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(duration)s\t%(upload_date)s",
-        "--no-warnings",
-        url
-    ]
+    cmd = (
+        [YTDLP_BIN]
+        + get_ytdlp_cookie_args()
+        + [
+            "--flat-playlist",
+            "--playlist-end", str(nb_videos),
+            "--print", "%(id)s\t%(title)s\t%(url)s\t%(view_count)s\t%(like_count)s\t%(comment_count)s\t%(duration)s\t%(upload_date)s",
+            "--no-warnings",
+            url,
+        ]
+    )
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -169,6 +174,18 @@ st.markdown("""
     <p style="color:#555;margin-top:0.3rem;">Analyse automatique complète de tous les contenus d'un compte TikTok ou Instagram</p>
 </div>
 """, unsafe_allow_html=True)
+
+# ─── Statut cookies ───────────────────────────────────────────────────────────
+_has_cookies_b64 = bool(os.getenv("TIKTOK_COOKIES_B64", "").strip())
+if IS_RAILWAY and not _has_cookies_b64:
+    st.warning(
+        "⚠️ **Railway détecté sans cookies TikTok** — l'analyse de compte peut échouer sur les vidéos privées/protégées. "
+        "Pour activer : exporte `cookies.txt` depuis Chrome (extension *Get cookies.txt LOCALLY*), "
+        "encode en base64 et ajoute `TIKTOK_COOKIES_B64` dans les variables Railway.",
+        icon="🍪",
+    )
+elif IS_RAILWAY and _has_cookies_b64:
+    st.success("🍪 Cookies TikTok configurés — accès complet activé.", icon="✅")
 
 # ─── Section A — Input ────────────────────────────────────────────────────────
 with st.container():
