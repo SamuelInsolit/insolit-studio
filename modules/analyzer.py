@@ -504,7 +504,7 @@ def analyze_video(
         )
         session.add(ac)
 
-        titre_auto = _generate_title(metadata, whisper_result, hook)
+        titre_auto = _generate_title(metadata, whisper_result, hook, duree=duree)
         video.titre = titre_auto
         session.commit()
 
@@ -622,15 +622,27 @@ def _load_all_embeddings(session, exclude_id: int = None) -> list:
     return result
 
 
-def _generate_title(metadata: dict, whisper_data: dict, hook_data: dict) -> str:
-    partenaire = metadata.get("partenaire", "")
-    ville = metadata.get("ville", "")
-    hook_text = hook_data.get("texte_dit", "")
-    if partenaire and ville:
-        return f"{partenaire} — {ville}"
-    elif hook_text:
-        return hook_text[:80]
-    elif partenaire:
-        return partenaire
+def _generate_title(metadata: dict, whisper_data: dict, hook_data: dict, duree: float = 0) -> str:
+    """
+    Génère un titre propre et lisible.
+    Format : [Partenaire ou @compte ou Catégorie] · [Durée]s · [Date]
+    """
+    partenaire  = (metadata.get("partenaire") or "").strip()
+    nom_compte  = (metadata.get("nom_compte") or "").strip().lstrip("@")
+    categorie   = (metadata.get("categorie") or "").strip()
+    date_str    = datetime.now().strftime("%d/%m/%Y")
+    duree_str   = f"{int(duree)}s" if duree and duree > 0 else ""
+
+    if partenaire:
+        parts = [partenaire]
+    elif nom_compte:
+        parts = [f"@{nom_compte}"]
+    elif categorie:
+        parts = [categorie]
     else:
-        return f"Vidéo du {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+        parts = ["Vidéo"]
+
+    if duree_str:
+        parts.append(duree_str)
+    parts.append(date_str)
+    return " · ".join(parts)

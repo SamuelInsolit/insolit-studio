@@ -176,17 +176,20 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown("**Navigation**")
-    st.page_link("pages/1_Analyser.py",            label="🎬 Analyser une vidéo")
-    st.page_link("pages/2_Bibliotheque.py",         label="📚 Ma bibliothèque")
-    st.page_link("pages/3_Patterns.py",             label="📊 Patterns & Insights")
-    st.page_link("pages/4_Generer.py",              label="✨ Générer un brief")
-    st.page_link("pages/5_Compte.py",               label="🔭 Analyser un compte")
+    st.markdown('<div style="font-size:0.72rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:2px;margin-bottom:4px;">Principal</div>', unsafe_allow_html=True)
+    st.page_link("pages/1_Analyser.py",            label="🎬 Analyseur")
+    st.page_link("pages/2_Bibliotheque.py",         label="📚 Bibliothèque")
+    st.page_link("pages/3_Patterns.py",             label="📊 Motifs")
+    st.page_link("pages/4_Generer.py",              label="⚡ Générer")
     st.page_link("pages/6_Base_Connaissances.py",   label="📖 Base de connaissances")
-    st.page_link("pages/7_Enrichir.py",             label="📥 Enrichir ma base")
 
     st.divider()
-    st.caption("Propulsé par Claude Vision · Whisper · ffmpeg")
+    st.markdown('<div style="font-size:0.72rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:2px;margin-bottom:4px;">Avancé</div>', unsafe_allow_html=True)
+    st.page_link("pages/5_Compte.py",               label="🔍 Analyser un compte")
+    st.page_link("pages/7_Enrichir.py",             label="⚡ Enrichir")
+
+    st.divider()
+    st.caption("Claude Vision · Whisper · ffmpeg")
 
 # ─── Data loading ─────────────────────────────────────────────────────────────
 
@@ -299,6 +302,46 @@ else:
     </p>
     """, unsafe_allow_html=True)
 
+if data and data["total_videos"] < 3:
+    st.markdown("""
+    <div style="background:linear-gradient(135deg,#0d0d1a,#0a0a0a);border:1px solid #2a2a4a;
+                border-left:4px solid #ff00a4;border-radius:14px;padding:1.4rem 1.6rem;margin-bottom:1.5rem;">
+        <div style="font-size:1.1rem;font-weight:900;color:#ff00a4;margin-bottom:0.8rem;">
+            👋 Par où commencer ?
+        </div>
+        <div style="color:#aaa;font-size:0.88rem;margin-bottom:1rem;">3 étapes pour démarrer :</div>
+        <div style="display:flex;flex-direction:column;gap:0.7rem;">
+            <div style="display:flex;align-items:flex-start;gap:12px;">
+                <div style="background:#ff00a4;color:#000;border-radius:50%;width:24px;height:24px;
+                            display:flex;align-items:center;justify-content:center;font-weight:900;
+                            font-size:0.75rem;flex-shrink:0;">1</div>
+                <div>
+                    <div style="color:#fff;font-weight:700;">🎬 Analyse ta première vidéo</div>
+                    <div style="color:#555;font-size:0.82rem;">→ page Analyseur</div>
+                </div>
+            </div>
+            <div style="display:flex;align-items:flex-start;gap:12px;">
+                <div style="background:#01f0fc;color:#000;border-radius:50%;width:24px;height:24px;
+                            display:flex;align-items:center;justify-content:center;font-weight:900;
+                            font-size:0.75rem;flex-shrink:0;">2</div>
+                <div>
+                    <div style="color:#fff;font-weight:700;">⚡ Note sa performance</div>
+                    <div style="color:#555;font-size:0.82rem;">→ page Enrichir (45 secondes)</div>
+                </div>
+            </div>
+            <div style="display:flex;align-items:flex-start;gap:12px;">
+                <div style="background:#00cc66;color:#000;border-radius:50%;width:24px;height:24px;
+                            display:flex;align-items:center;justify-content:center;font-weight:900;
+                            font-size:0.75rem;flex-shrink:0;">3</div>
+                <div>
+                    <div style="color:#fff;font-weight:700;">🔁 Répète sur 10 vidéos</div>
+                    <div style="color:#555;font-size:0.82rem;">→ les patterns se débloquent automatiquement</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 if data:
     # ─── ROW 1 — KPI Cards ────────────────────────────────────────────────────
     st.markdown('<div class="section-title">Performance</div>', unsafe_allow_html=True)
@@ -384,7 +427,9 @@ if data:
             thumb_path = os.path.join("screenshots", str(vid_id), "plan_01.jpg")
             has_thumb  = os.path.exists(thumb_path)
 
-            titre_display = (vid["titre"][:40] + "…") if len(vid["titre"]) > 40 else vid["titre"]
+            import html as _html
+            _titre_raw = vid["titre"] or ""
+            titre_display = _html.escape((_titre_raw[:40] + "…") if len(_titre_raw) > 40 else _titre_raw)
 
             badge_html = ""
             if vid["perf_tag"] and vid["perf_tag"] in BADGE:

@@ -1,3 +1,4 @@
+import html as _html
 import json
 import os
 import streamlit as st
@@ -10,15 +11,49 @@ st.set_page_config(page_title="Bibliothèque — Insolit Studio", page_icon="�
 from modules.styles import apply_styles
 apply_styles()
 
+# ─── Couleurs de performance ──────────────────────────────────────────────────
+PERF_BORDER = {
+    "viral":   "#00C853",
+    "bon":     "#2196F3",
+    "moyen":   "#FF9800",
+    "mauvais": "#F44336",
+}
+PERF_LABEL_MAP = {
+    "viral":   "🔥 Viral",
+    "bon":     "✅ Bon",
+    "moyen":   "😐 Moyen",
+    "mauvais": "❌ Mauvais",
+}
+PERF_TEXT_COLOR = {
+    "viral":   "#000",
+    "bon":     "#fff",
+    "moyen":   "#000",
+    "mauvais": "#fff",
+}
+
+# Couleurs placeholder par catégorie
+CAT_COLORS = {
+    "Restaurant":    "#E65100",
+    "Bar":           "#7B1FA2",
+    "Café":          "#5D4037",
+    "Expérience":    "#1565C0",
+    "Bon plan":      "#2E7D32",
+    "Tendance food": "#AD1457",
+    "Lifestyle":     "#4527A0",
+    "Voyage IDF":    "#00695C",
+    "Autre":         "#37474F",
+}
+
 st.markdown("""
 <style>
+/* Cards base */
 .video-card {
     background: #0a0a0a;
-    border: 1px solid #1a1a1a;
+    border: 2px solid #1a1a1a;
     border-radius: 12px;
     padding: 1rem;
     margin-bottom: 0.5rem;
-    transition: border-color 0.2s;
+    transition: border-color 0.15s;
 }
 .video-card:hover { border-color: #ff00a4; }
 .video-card-selected {
@@ -43,13 +78,43 @@ st.markdown("""
     font-size: 0.8rem;
     font-weight: 700;
 }
+/* Badge à annoter */
+.badge-annotate {
+    background: #ff6600;
+    color: #fff;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.7em;
+    font-weight: 700;
+    cursor: pointer;
+}
+.badge-done {
+    background: #00C853;
+    color: #000;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.7em;
+    font-weight: 700;
+}
+/* Placeholder thumb */
+.thumb-placeholder {
+    height: 110px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.2rem;
+    font-weight: 900;
+    color: rgba(255,255,255,0.9);
+    letter-spacing: -1px;
+}
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<h1 style="color:#ff00a4;font-weight:900;">📚 Ma bibliothèque</h1>', unsafe_allow_html=True)
 
 from modules.database import get_all_videos_with_stats, get_precision_level, delete_video
-from modules.enrichment import get_precision_badge, PERFORMANCE_LABELS, PERFORMANCE_COLORS
+from modules.enrichment import get_precision_badge
 
 # ─── Initialisation session state ────────────────────────────────────────────
 if "selected_ids" not in st.session_state:
@@ -134,12 +199,7 @@ if st.session_state.delete_mode:
 
 # ─── Recherche sémantique (exemples rapides) ──────────────────────────────────
 ex_cols = st.columns(4)
-examples = [
-    "hook prix choc",
-    "extérieur plein air",
-    "réaction visage",
-    "texte à l'écran",
-]
+examples = ["hook prix choc", "extérieur plein air", "réaction visage", "texte à l'écran"]
 for i, ex in enumerate(examples):
     with ex_cols[i]:
         if st.button(f'"{ex}"', key=f"ex_{i}", use_container_width=True):
@@ -176,7 +236,6 @@ with col5:
 # ─── Chargement des vidéos ────────────────────────────────────────────────────
 all_videos = get_all_videos_with_stats()
 
-# Filtres
 source_map = {"Mon compte": "mon_compte", "Concurrent": "concurrent", "Inspiration": "inspiration", "Secteur": "secteur"}
 if filter_source != "Toutes":
     all_videos = [v for v in all_videos if v.get("type_source") == source_map.get(filter_source)]
@@ -191,7 +250,6 @@ elif filter_perf != "Toutes":
 if filter_cat != "Toutes":
     all_videos = [v for v in all_videos if v.get("categorie") == filter_cat]
 
-# Recherche textuelle locale
 if search_query:
     q = search_query.lower()
     all_videos = [
@@ -203,7 +261,6 @@ if search_query:
         or q in (v.get("categorie") or "").lower()
     ]
 
-# Tri
 if filter_sort == "Plus de vues":
     all_videos.sort(key=lambda v: v.get("vues") or 0, reverse=True)
 elif filter_sort == "Score le plus élevé":
@@ -237,59 +294,100 @@ if not all_videos:
     """, unsafe_allow_html=True)
     st.stop()
 
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _thumb_html(vid_id, categorie="", size_px=110) -> tuple[bool, str]:
+    """Retourne (has_real_thumb, html_string)."""
+    shot_file = os.path.join("./screenshots", str(vid_id), "plan_01.jpg")
+    if os.path.exists(shot_file):
+        return True, shot_file
+    # Placeholder coloré avec première lettre de la catégorie
+    cat_color = CAT_COLORS.get(categorie, "#37474F")
+    letter = (categorie or "V")[0].upper()
+    placeholder = f"""<div class="thumb-placeholder" style="background:{cat_color};">{letter}</div>"""
+    return False, placeholder
+
+
+def _border_style(perf: str) -> str:
+    color = PERF_BORDER.get(perf, "#1a1a1a")
+    return f"border: 2px solid {color};"
+
+
+def _perf_badge_html(perf: str) -> str:
+    if not perf:
+        return '<span class="badge-annotate">⚡ À annoter</span>'
+    label = PERF_LABEL_MAP.get(perf, perf)
+    color = PERF_BORDER.get(perf, "#555")
+    txt   = PERF_TEXT_COLOR.get(perf, "#fff")
+    return f'<span style="background:{color};color:{txt};padding:2px 8px;border-radius:10px;font-size:0.7em;font-weight:700;">{label}</span>'
+
+
 # ─── Affichage ────────────────────────────────────────────────────────────────
 nb_cols = 4 if view_mode == "Grille (4 col)" else (1 if view_mode == "Liste" else 3)
 
 if view_mode == "Liste":
     # ── Vue liste ─────────────────────────────────────────────────────────────
     for video in all_videos:
-        vid_id = video["id"]
-        is_selected = vid_id in st.session_state.selected_ids
-        perf = video.get("performance_tag", "")
-        perf_label = PERFORMANCE_LABELS.get(perf, "")
-        perf_color = PERFORMANCE_COLORS.get(perf, "#333")
+        vid_id   = video["id"]
+        is_sel   = vid_id in st.session_state.selected_ids
+        perf     = video.get("performance_tag", "")
+        score    = video.get("score_potentiel")
+        score_color = "#ff00a4" if score and score >= 7 else "#888"
+
+        titre_safe = _html.escape(video.get("titre") or "Sans titre")
+        compte_safe = _html.escape(video.get("nom_compte") or "—")
+        cat_safe    = _html.escape(video.get("categorie") or "—")
+
+        border = _border_style(perf)
+        has_thumb, thumb_data = _thumb_html(vid_id, video.get("categorie", ""))
 
         with st.container():
-            cols = st.columns([0.4, 3, 1, 1, 1, 1, 0.6] if not st.session_state.delete_mode else [0.4, 0.3, 3, 1, 1, 1, 1])
+            cols = st.columns(
+                [0.4, 3, 1, 1, 1, 1, 0.6] if not st.session_state.delete_mode
+                else [0.4, 0.3, 3, 1, 1, 1, 1]
+            )
 
             if st.session_state.delete_mode:
                 with cols[0]:
-                    checked = st.checkbox("", key=f"chk_{vid_id}", value=is_selected, label_visibility="collapsed")
+                    checked = st.checkbox("", key=f"chk_{vid_id}", value=is_sel, label_visibility="collapsed")
                     if checked and vid_id not in st.session_state.selected_ids:
-                        st.session_state.selected_ids.add(vid_id)
-                        st.rerun()
+                        st.session_state.selected_ids.add(vid_id); st.rerun()
                     elif not checked and vid_id in st.session_state.selected_ids:
-                        st.session_state.selected_ids.discard(vid_id)
-                        st.rerun()
+                        st.session_state.selected_ids.discard(vid_id); st.rerun()
                 offset = 1
             else:
                 offset = 0
 
             with cols[offset]:
-                shot_file = os.path.join("./screenshots", str(vid_id), "plan_01.jpg")
-                if os.path.exists(shot_file):
-                    st.image(shot_file, width=60)
+                if has_thumb:
+                    st.image(thumb_data, width=60)
                 else:
-                    st.markdown('<div style="width:60px;height:60px;background:#111;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;">🎬</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div style="width:60px;height:60px;background:{CAT_COLORS.get(video.get("categorie",""),"#37474F")};'
+                        f'border-radius:6px;display:flex;align-items:center;justify-content:center;'
+                        f'font-size:1.4rem;font-weight:900;color:rgba(255,255,255,0.9);">'
+                        f'{(video.get("categorie","V") or "V")[0].upper()}</div>',
+                        unsafe_allow_html=True
+                    )
 
             with cols[offset + 1]:
-                st.markdown(f"**{video.get('titre', 'Sans titre')[:55]}**")
-                st.caption(f"@{video.get('nom_compte','—')} · {video.get('categorie','—')} · {video.get('duree_secondes',0):.0f}s")
+                st.markdown(f"**{titre_safe[:55]}**")
+                st.caption(f"@{compte_safe} · {cat_safe} · {video.get('duree_secondes',0):.0f}s")
 
             with cols[offset + 2]:
                 vues = video.get("vues") or 0
                 st.markdown(f"👁 **{vues:,}**" if vues else "👁 —")
 
             with cols[offset + 3]:
-                score = video.get("score_potentiel")
-                color = "#ff00a4" if score and score >= 7 else "#888"
-                st.markdown(f'<span style="color:{color};font-weight:700;">{score}/10</span>' if score else "—", unsafe_allow_html=True)
+                st.markdown(
+                    f'<span style="color:{score_color};font-weight:700;">{score}/10</span>'
+                    if score else "—",
+                    unsafe_allow_html=True
+                )
 
             with cols[offset + 4]:
-                if perf:
-                    st.markdown(f'<span style="background:{perf_color};color:{"#000" if perf=="bon" else "#fff"};padding:2px 8px;border-radius:10px;font-size:0.75em;font-weight:700;">{perf_label}</span>', unsafe_allow_html=True)
-                else:
-                    st.caption("non annoté")
+                st.markdown(_perf_badge_html(perf), unsafe_allow_html=True)
 
             with cols[offset + 5]:
                 if not st.session_state.delete_mode:
@@ -301,6 +399,10 @@ if view_mode == "Liste":
                         if st.button("🎯", key=f"brief_l_{vid_id}", help="Générer brief", use_container_width=True):
                             st.session_state["brief_from_video_id"] = vid_id
                             st.switch_page("pages/4_Generer.py")
+                    # Si non annoté → bouton Enrichir
+                    if not perf:
+                        if st.button("⚡", key=f"enr_l_{vid_id}", help="Annoter", use_container_width=True):
+                            st.switch_page("pages/7_Enrichir.py")
 
         st.divider()
 
@@ -309,61 +411,64 @@ else:
     cols = st.columns(nb_cols)
     for idx, video in enumerate(all_videos):
         vid_id = video["id"]
-        is_selected = vid_id in st.session_state.selected_ids
-        col = cols[idx % nb_cols]
+        is_sel = vid_id in st.session_state.selected_ids
+        col    = cols[idx % nb_cols]
+        perf   = video.get("performance_tag", "")
+        score  = video.get("score_potentiel")
+        score_color = "#ff00a4" if score and score >= 7 else ("#01f0fc" if score and score >= 5 else "#555")
+
+        titre_safe  = _html.escape(video.get("titre") or "Sans titre")
+        compte_safe = _html.escape(video.get("nom_compte") or "—")
+        border      = _border_style(perf)
+        has_thumb, thumb_data = _thumb_html(vid_id, video.get("categorie", ""))
 
         with col:
-            # Screenshot
-            shot_file = os.path.join("./screenshots", str(vid_id), "plan_01.jpg")
-            if os.path.exists(shot_file):
-                st.image(shot_file, use_container_width=True)
+            # Miniature
+            if has_thumb:
+                st.image(thumb_data, use_container_width=True)
             else:
-                st.markdown(f"""
-                <div style="background:#111;height:110px;border-radius:8px;
-                display:flex;align-items:center;justify-content:center;color:#333;font-size:2rem;">🎬</div>
-                """, unsafe_allow_html=True)
+                cat_color = CAT_COLORS.get(video.get("categorie", ""), "#37474F")
+                letter    = (video.get("categorie", "V") or "V")[0].upper()
+                st.markdown(
+                    f'<div class="thumb-placeholder" style="background:{cat_color};">{letter}</div>',
+                    unsafe_allow_html=True
+                )
 
-            perf = video.get("performance_tag", "")
-            perf_label = PERFORMANCE_LABELS.get(perf, "")
-            perf_color = PERFORMANCE_COLORS.get(perf, "#333")
-            score = video.get("score_potentiel")
-            score_color = "#ff00a4" if score and score >= 7 else ("#01f0fc" if score and score >= 5 else "#555")
+            # Card infos
+            perf_badge = _perf_badge_html(perf)
+            vues_str   = f'{video.get("vues",0):,}v' if video.get("vues") else ""
+            annote_badge = '<span class="badge-done">✓ Annoté</span>' if perf else '<span class="badge-annotate">⚡ À annoter</span>'
 
             st.markdown(f"""
-            <div style="padding:0.4rem 0;">
-                <div style="font-weight:700;font-size:0.85rem;line-height:1.3;">{video.get('titre','Sans titre')[:45]}</div>
-                <div style="color:#666;font-size:0.75rem;margin-top:2px;">@{video.get('nom_compte','—')}</div>
-                <div style="margin-top:4px;display:flex;align-items:center;gap:6px;">
+            <div style="padding:0.4rem 0; {border} border-radius:0 0 8px 8px; padding: 0.5rem 0.4rem;">
+                <div style="font-weight:700;font-size:0.85rem;line-height:1.3;
+                            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                    {titre_safe[:45]}
+                </div>
+                <div style="color:#666;font-size:0.75rem;margin-top:2px;">@{compte_safe}</div>
+                <div style="margin-top:4px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
                     <span style="color:#555;font-size:0.75rem;">⏱{video.get('duree_secondes',0):.0f}s</span>
                     <span style="color:#555;font-size:0.75rem;">📐{video.get('nb_plans','?')}</span>
                     <span style="color:{score_color};font-size:0.75rem;font-weight:700;">{score}/10</span>
                 </div>
-                <div style="margin-top:4px;">
-                    {'<span style="background:' + perf_color + ';color:' + ("#000" if perf=="bon" else "#fff") + ';padding:1px 7px;border-radius:10px;font-size:0.7em;font-weight:700;">' + perf_label + '</span>' if perf else '<span style="color:#333;font-size:0.7em;">non annoté</span>'}
-                    {f'<span style="color:#666;font-size:0.7rem;margin-left:4px;">{video.get("vues",0):,}v</span>' if video.get("vues") else ''}
+                <div style="margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                    {perf_badge}
+                    {f'<span style="color:#666;font-size:0.7rem;">{vues_str}</span>' if vues_str else ''}
+                    {annote_badge}
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
             if st.session_state.delete_mode:
-                # Checkbox de sélection
-                checked = st.checkbox(
-                    f"Sélectionner",
-                    key=f"chk_g_{vid_id}",
-                    value=is_selected,
-                )
+                checked = st.checkbox("Sélectionner", key=f"chk_g_{vid_id}", value=is_sel)
                 if checked and vid_id not in st.session_state.selected_ids:
-                    st.session_state.selected_ids.add(vid_id)
-                    st.rerun()
+                    st.session_state.selected_ids.add(vid_id); st.rerun()
                 elif not checked and vid_id in st.session_state.selected_ids:
-                    st.session_state.selected_ids.discard(vid_id)
-                    st.rerun()
-
-                # Suppression rapide (1 vidéo)
+                    st.session_state.selected_ids.discard(vid_id); st.rerun()
                 if st.button(f"🗑️ Suppr.", key=f"del1_{vid_id}", use_container_width=True):
                     res = delete_video(vid_id)
                     if res["success"]:
-                        st.success(f"Supprimée !")
+                        st.success("Supprimée !")
                     else:
                         st.error(res["message"])
                     st.session_state.selected_ids.discard(vid_id)
@@ -374,9 +479,13 @@ else:
                     if st.button("📊 Voir", key=f"voir_{vid_id}", use_container_width=True):
                         st.session_state["view_video_id"] = vid_id
                 with c_b:
-                    if st.button("🎯 Brief", key=f"brief_{vid_id}", use_container_width=True):
-                        st.session_state["brief_from_video_id"] = vid_id
-                        st.switch_page("pages/4_Generer.py")
+                    if not perf:
+                        if st.button("⚡ Annoter", key=f"enr_{vid_id}", use_container_width=True):
+                            st.switch_page("pages/7_Enrichir.py")
+                    else:
+                        if st.button("🎯 Brief", key=f"brief_{vid_id}", use_container_width=True):
+                            st.session_state["brief_from_video_id"] = vid_id
+                            st.switch_page("pages/4_Generer.py")
 
             st.markdown("<hr style='border:none;border-top:1px solid #111;margin:0.5rem 0;'>", unsafe_allow_html=True)
 

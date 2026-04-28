@@ -18,24 +18,82 @@ nb_annotees, niveau = get_precision_level()
 
 if nb_annotees < 10:
     manquantes = 10 - nb_annotees
-    st.warning(f"⚠️ Analyse encore **{manquantes} vidéo{'s' if manquantes > 1 else ''}** avec enrichissement pour débloquer les patterns.")
-    st.info(f"Vidéos annotées actuellement : **{nb_annotees}/10**")
+    pct = int((nb_annotees / 10) * 100)
+    filled = int(pct / 5)   # 20 blocs → chaque bloc = 5%
+    empty  = 20 - filled
+    bar_html = "█" * filled + "░" * empty
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("""
-        <div class="card">
-            <h3 style="color:#FF4444;">🔒 Graphiques verrouillés</h3>
-            <p>Débloque avec 10 vidéos annotées</p>
+    st.markdown(f"""
+    <div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:14px;
+                padding:1.5rem 1.8rem;margin-bottom:1.2rem;">
+        <div style="font-size:1rem;font-weight:900;color:#ff00a4;margin-bottom:0.8rem;">
+            🔓 Déblocage des patterns
         </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown("""
-        <div class="card">
-            <h3 style="color:#FF4444;">🔒 Rapport IA verrouillé</h3>
-            <p>Débloque avec 10 vidéos annotées</p>
+        <div style="font-family:monospace;font-size:1.1rem;color:#01f0fc;margin-bottom:0.4rem;">
+            {bar_html} &nbsp;<strong style="color:#fff;">{nb_annotees}/10</strong>
         </div>
-        """, unsafe_allow_html=True)
+        <div style="color:#666;font-size:0.82rem;margin-bottom:1.2rem;">
+            Chaque vidéo annotée = +10% de précision sur tes briefs
+        </div>
+        <div style="display:flex;flex-direction:column;gap:0.4rem;font-size:0.85rem;">
+            <div style="color:{'#00cc66' if nb_annotees >= 10 else '#444'};">
+                {'✅' if nb_annotees >= 10 else '🔒'} <strong>10 vidéos</strong> — Graphiques & corrélations
+            </div>
+            <div style="color:{'#00cc66' if nb_annotees >= 20 else '#444'};">
+                {'✅' if nb_annotees >= 20 else '🔒'} <strong>20 vidéos</strong> — Rapport IA complet
+            </div>
+            <div style="color:{'#00cc66' if nb_annotees >= 30 else '#444'};">
+                {'✅' if nb_annotees >= 30 else '🔒'} <strong>30 vidéos</strong> — Prédictions & recommandations
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("⚡ Annoter mes vidéos maintenant →", use_container_width=True, type="primary"):
+        st.switch_page("pages/7_Enrichir.py")
+
+    # ── Données disponibles dès la 1ère vidéo ──────────────────────────────
+    from modules.database import get_all_videos_with_stats
+    all_vids_preview = get_all_videos_with_stats()
+    annotated_preview = [v for v in all_vids_preview if v.get("performance_tag")]
+    toutes_preview    = all_vids_preview  # toutes, même non annotées
+
+    if toutes_preview:
+        st.markdown("---")
+        st.markdown("### 📊 Données disponibles maintenant")
+
+        v0 = toutes_preview[0]
+        col_a, col_b, col_c, col_d = st.columns(4)
+        with col_a:
+            st.metric("Vidéos analysées", len(toutes_preview))
+        with col_b:
+            st.metric("Annotées", len(annotated_preview))
+        with col_c:
+            durees = [v.get("duree_secondes") for v in toutes_preview if v.get("duree_secondes")]
+            st.metric("Durée moy.", f"{sum(durees)/len(durees):.0f}s" if durees else "—")
+        with col_d:
+            scores = [v.get("score_potentiel") for v in toutes_preview if v.get("score_potentiel")]
+            st.metric("Score moy.", f"{sum(scores)/len(scores):.1f}/10" if scores else "—")
+
+        if annotated_preview:
+            st.markdown("#### Vidéos de référence annotées")
+            for v in annotated_preview[:5]:
+                perf = v.get("performance_tag", "")
+                COLORS = {"viral": "#00C853", "bon": "#2196F3", "moyen": "#FF9800", "mauvais": "#F44336"}
+                c = COLORS.get(perf, "#555")
+                import html as _h
+                t = _h.escape(v.get("titre") or "Sans titre")
+                st.markdown(f"""
+                <div style="background:#0a0a0a;border-left:3px solid {c};border-radius:6px;
+                            padding:0.5rem 0.8rem;margin-bottom:0.4rem;font-size:0.85rem;">
+                    <strong style="color:#fff;">{t[:55]}</strong>
+                    <span style="color:{c};margin-left:8px;font-size:0.8em;">{perf.upper() if perf else ''}</span>
+                    <span style="color:#555;margin-left:8px;">{v.get('duree_secondes',0):.0f}s
+                    · score {v.get('score_potentiel','?')}/10
+                    · {v.get('nb_plans','?')} plans</span>
+                </div>
+                """, unsafe_allow_html=True)
+
     st.stop()
 
 # ─── Chargement des données ───────────────────────────────────────────────────
