@@ -269,7 +269,17 @@ def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: lis
     ]
 
     # Whisper : tronquer si trop long
-    texte = whisper_data.get("texte_complet", "Non disponible")
+    texte = whisper_data.get("texte_complet", "")
+    if not texte:
+        # Fallback : reconstruire depuis les textes visibles détectés par Vision
+        textes_ecran = []
+        if hook.get("texte_dit"):
+            textes_ecran.append(f"[HOOK] {hook['texte_dit']}")
+        for p in pegasus_data.get("plans", [])[:10]:
+            te = p.get("texte_visible_ecran") or p.get("texte_dit", "")
+            if te and str(te).strip() and str(te).strip().lower() not in ("none", "null", "-", "—"):
+                textes_ecran.append(f"[{p.get('timestamp_debut',0):.0f}s] {te}")
+        texte = " | ".join(textes_ecran) if textes_ecran else "Non disponible"
     if len(texte) > 600:
         texte = texte[:600] + "..."
 

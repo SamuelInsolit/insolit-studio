@@ -541,18 +541,105 @@ if "last_analysis" in st.session_state:
         if manque:
             st.warning(f"**Ce qui manque :** {manque}")
 
-    # ── BLOC 4 — Script mot par mot ───────────────────────────────────────────
-    mots = whisper.get("mots", [])
+    # ── BLOC 4 — Script complet ───────────────────────────────────────────────
+    st.markdown("### 📝 Script complet")
+    mots          = whisper.get("mots", [])
+    texte_complet = whisper.get("texte_complet", "")
+    nb_mots       = whisper.get("nb_mots", 0)
+    debit         = whisper.get("debit_parole", 0)
+    info_msg      = whisper.get("_info", "")
+    err_msg       = whisper.get("_error", "")
+
+    from modules.whisper_mod import format_transcript_display
+
     if mots:
-        st.markdown("### 📝 Script mot par mot")
-        from modules.whisper_mod import format_transcript_display
-        transcript_text = format_transcript_display(mots)
+        # ── Cas 1 : mots avec timestamps → affichage riche ────────────────────
+        transcript_timed = format_transcript_display(mots)
+        meta_label = f"📄 {nb_mots} mots · {debit} mots/s · avec timestamps"
+
+        # Texte continu lisible (sans timestamps) pour lecture rapide
+        texte_continu = " ".join(w["mot"] for w in mots) if mots else texte_complet
+
+        tab_lire, tab_timestamps = st.tabs(["📖 Lire le script", "⏱ Avec timestamps"])
+
+        with tab_lire:
+            st.text_area(
+                meta_label,
+                texte_continu,
+                height=220,
+                key="transcript_continu"
+            )
+            if st.button("📋 Copier", key="copy_script_continu"):
+                st.code(texte_continu)
+
+        with tab_timestamps:
+            st.text_area(
+                "Script mot par mot avec timestamps",
+                transcript_timed,
+                height=220,
+                key="transcript_timed"
+            )
+            if st.button("📋 Copier (avec timestamps)", key="copy_script_timed"):
+                st.code(transcript_timed)
+
+    elif texte_complet:
+        # ── Cas 2 : texte complet sans word-timestamps ─────────────────────────
         st.text_area(
-            f"Débit : {whisper.get('debit_parole', 0)} mots/s | {whisper.get('nb_mots', 0)} mots",
-            transcript_text, height=200, key="transcript_display"
+            f"📄 {len(texte_complet.split())} mots transcrits",
+            texte_complet,
+            height=220,
+            key="transcript_display"
         )
-        if st.button("📋 Copier la transcription"):
-            st.code(transcript_text)
+        if st.button("📋 Copier le script", key="copy_script"):
+            st.code(texte_complet)
+        if info_msg:
+            st.caption(f"ℹ️ {info_msg}")
+
+    else:
+        # ── Cas 3 : transcription indisponible ────────────────────────────────
+        # Essai de récupérer le texte depuis le hook Claude (analyse vision)
+        hook_text_val = hook.get("texte_dit") or creative.get("hook_texte", "")
+        script_adapte_val = creative.get("script_adapte", "") or creative.get("note_adaptation", "")
+
+        if hook_text_val or script_adapte_val:
+            st.info(
+                "⚠️ La transcription audio n'a pas pu être générée. "
+                "Claude a quand même analysé le contenu visuel et les paroles visibles."
+            )
+            if hook_text_val:
+                st.markdown(f"**🎣 Paroles détectées (hook) :** «{hook_text_val}»")
+            if script_adapte_val:
+                st.markdown(f"**Script reconstruit (Claude Vision) :** {script_adapte_val[:500]}")
+        else:
+            st.warning(
+                "⚠️ Transcription audio non disponible.  \n"
+                "Sur Railway : configure `OPENAI_API_KEY` dans les variables d'environnement.  \n"
+                "En local : vérifie que le module `whisper` est installé."
+            )
+            if err_msg:
+                st.caption(f"Erreur Whisper : {err_msg}")
+
+    # ── Script visuel reconstruit depuis Vision (toujours affiché) ────────────
+    # Reconstruit le script ligne par ligne depuis les textes détectés dans les plans
+    hook_dit  = hook.get("texte_dit", "") or creative.get("hook_texte", "")
+    hook_vis  = hook.get("texte_visible", "") or ""
+    textes_ecran = []
+    for plan in plans:
+        te = plan.get("texte_visible_ecran")
+        if te and str(te).strip() and str(te).strip().lower() not in ("none", "null", "—", "-"):
+            ts = plan.get("timestamp_debut", 0)
+            textes_ecran.append(f"[{float(ts):.1f}s] {te}")
+
+    if hook_dit or textes_ecran:
+        with st.expander("🎬 Textes détectés par Claude Vision (paroles + écran)", expanded=not mots):
+            if hook_dit:
+                st.markdown(f"**🎣 Hook (dit) :** «{hook_dit}»")
+            if hook_vis:
+                st.markdown(f"**🔤 Hook (écran) :** {hook_vis}")
+            if textes_ecran:
+                st.markdown("**📋 Textes visibles dans les plans :**")
+                for t in textes_ecran:
+                    st.markdown(f"- {t}")
 
     # ── BLOC 5 — Adaptation Insolit ───────────────────────────────────────────
     if creative.get("adaptable_insolit") is not False:
