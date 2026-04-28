@@ -145,9 +145,13 @@ Génère un rapport JSON complet (sans markdown) :
   ],
   "hooks_qui_marchent": [
     {{
-      "texte": "texte du hook",
+      "hook_complet": "description des 3-4 premières secondes combinant visuel + auditif + texte",
+      "visuel_hook": "ce qu'on voit exactement (plan, sujet, action, mouvement, couleurs)",
+      "auditif_hook": "ce qu'on entend exactement (voix, son, musique, silence)",
+      "texte_ecran_hook": "texte exact affiché à l'écran (ou 'aucun')",
+      "mecanique": "pourquoi ces 3-4s donnent envie de continuer (curiosité/FOMO/conflit/désir/humour)",
       "score": 8,
-      "pourquoi": "explication"
+      "ce_qui_manque": "ce qui pourrait rendre ce hook encore plus fort"
     }}
   ],
   "opportunites_insolit": [
@@ -527,20 +531,102 @@ if "last_compte_analysis" in st.session_state:
         st.markdown("### 🎣 Top hooks du compte")
         for h in hooks[:5]:
             score_h = h.get("score", 0)
-            st.markdown(f"""
-            <div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;padding:0.8rem;margin-bottom:0.5rem;display:flex;gap:1rem;align-items:center;">
-                <span style="font-size:1.2rem;font-weight:900;color:#ff00a4;min-width:35px;">{score_h}/10</span>
-                <div>
-                    <div style="font-style:italic;">«{h.get("texte","—")}»</div>
-                    <div style="color:#555;font-size:0.8rem;margin-top:3px;">{h.get("pourquoi","")}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            score_color = "#00C853" if score_h >= 8 else "#FFD700" if score_h >= 6 else "#FF6B35"
+
+            # Nouveau format riche
+            hook_complet   = h.get("hook_complet") or h.get("texte", "—")
+            visuel         = h.get("visuel_hook", "")
+            auditif        = h.get("auditif_hook", "")
+            texte_ecran    = h.get("texte_ecran_hook", "")
+            mecanique      = h.get("mecanique") or h.get("pourquoi", "")
+            ce_qui_manque  = h.get("ce_qui_manque", "")
+
+            # Lignes optionnelles
+            rows_html = ""
+            if visuel:
+                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">👁 VISUEL</span><br><span style="font-size:0.85em;">' + visuel + '</span></div>'
+            if auditif:
+                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">🔊 AUDITIF</span><br><span style="font-size:0.85em;">' + auditif + '</span></div>'
+            if texte_ecran and texte_ecran.lower() not in ("aucun", "none", ""):
+                rows_html += '<div style="margin-bottom:4px;"><span style="color:#888;font-size:0.78em;">📝 TEXTE ÉCRAN</span><br><span style="font-size:0.85em;font-weight:600;">' + texte_ecran + '</span></div>'
+            if mecanique:
+                rows_html += '<div style="margin-top:6px;padding-top:6px;border-top:1px solid #1a1a1a;"><span style="color:#ff00a4;font-size:0.78em;font-weight:700;">⚡ POURQUOI ÇA ACCROCHE</span><br><span style="font-size:0.85em;">' + mecanique + '</span></div>'
+            if ce_qui_manque:
+                rows_html += '<div style="margin-top:4px;"><span style="color:#888;font-size:0.78em;">⚠️ CE QUI MANQUE</span><br><span style="font-size:0.82em;color:#666;">' + ce_qui_manque + '</span></div>'
+
+            st.markdown(
+                '<div style="background:#0a0a0a;border:1px solid #222;border-left:3px solid ' + score_color + ';'
+                'border-radius:8px;padding:1rem;margin-bottom:0.75rem;">'
+                '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+                '<span style="font-size:0.75em;color:#555;text-transform:uppercase;letter-spacing:1px;">HOOK</span>'
+                '<span style="font-size:1.1rem;font-weight:900;color:' + score_color + ';">' + str(score_h) + '/10</span>'
+                '</div>'
+                '<div style="font-style:italic;font-size:0.9em;color:#ddd;margin-bottom:10px;">«' + hook_complet + '»</div>'
+                + rows_html +
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
     # ── BLOC 5 — Grille complète ──────────────────────────────────────────────
     if analyses:
         st.markdown("### 📊 Toutes les vidéos analysées")
         analyses_sorted = sorted(analyses, key=lambda x: x.get("vues") or 0, reverse=True)
+
+        from modules.database import Transcription, Plan as PlanDB
+
+        def _load_transcript(video_id):
+            """Charge les mots Whisper et les plans depuis la DB pour une vidéo."""
+            if not video_id:
+                return [], []
+            sess = get_session()
+            try:
+                mots  = sess.query(Transcription).filter_by(video_id=video_id).order_by(Transcription.timestamp).all()
+                plans = sess.query(PlanDB).filter_by(video_id=video_id).order_by(PlanDB.numero_plan).all()
+                return (
+                    [{"ts": m.timestamp, "mot": m.mot} for m in mots],
+                    [{"num": p.numero_plan, "debut": p.timestamp_debut, "fin": p.timestamp_fin,
+                      "texte": p.texte_visible or ""} for p in plans],
+                )
+            finally:
+                sess.close()
+
+        def _render_transcript(mots, plans, titre):
+            """Formate la transcription groupée par plan."""
+            if not mots:
+                return None
+
+            # Grouper les mots par plan
+            def _plan_for_ts(ts, plans):
+                for p in plans:
+                    if p["debut"] <= ts <= p["fin"]:
+                        return p["num"]
+                return 0
+
+            lines = []
+            if plans:
+                for p in plans:
+                    mots_plan = [m["mot"] for m in mots if p["debut"] <= m["ts"] <= p["fin"]]
+                    if not mots_plan and not p["texte"]:
+                        continue
+                    lines.append("PLAN " + str(p["num"]) + " (" + str(round(p["debut"], 1)) + "s–" + str(round(p["fin"], 1)) + "s) :")
+                    if mots_plan:
+                        lines.append('  Texte dit : "' + " ".join(mots_plan) + '"')
+                    if p["texte"]:
+                        lines.append("  Texte écran : " + p["texte"])
+                    lines.append("")
+            else:
+                # Pas de plans — affichage mot par mot
+                lines.append("MOT PAR MOT :")
+                chunk = []
+                for m in mots:
+                    chunk.append("[" + str(round(m["ts"], 1)) + "s] " + m["mot"])
+                    if len(chunk) >= 10:
+                        lines.append("  " + "  ".join(chunk))
+                        chunk = []
+                if chunk:
+                    lines.append("  " + "  ".join(chunk))
+
+            return "\n".join(lines)
 
         cols = st.columns(3)
         for idx, a in enumerate(analyses_sorted):
@@ -553,16 +639,34 @@ if "last_compte_analysis" in st.session_state:
                 else:
                     st.markdown('<div style="background:#111;height:100px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#333;font-size:1.5rem;">🎬</div>', unsafe_allow_html=True)
 
-                vues = a.get("vues")
+                vues    = a.get("vues")
                 vues_str = f"{vues:,}" if vues else "—"
                 score_v = a.get("score_potentiel", "—")
-                st.markdown(f"""
-                <div style="padding:0.4rem 0;">
-                    <div style="font-size:0.85rem;font-weight:600;">{(a.get("titre") or "—")[:45]}</div>
-                    <div style="color:#888;font-size:0.78rem;margin-top:2px;">👁 {vues_str} · Score {score_v}/10</div>
-                    <div style="color:#555;font-size:0.78rem;font-style:italic;">{(a.get("hook_texte") or "")[:50]}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                titre_v = (a.get("titre") or "—")
+                st.markdown(
+                    '<div style="padding:0.4rem 0;">'
+                    '<div style="font-size:0.85rem;font-weight:600;">' + titre_v[:45] + '</div>'
+                    '<div style="color:#888;font-size:0.78rem;margin-top:2px;">👁 ' + vues_str + ' · Score ' + str(score_v) + '/10</div>'
+                    '<div style="color:#555;font-size:0.78rem;font-style:italic;">' + (a.get("hook_texte") or "")[:50] + '</div>'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+                # Accordéon transcript
+                with st.expander("▶ Voir le script transcrit"):
+                    mots_db, plans_db = _load_transcript(vid_id)
+                    script_txt = _render_transcript(mots_db, plans_db, titre_v)
+                    if script_txt:
+                        st.text(script_txt)
+                        st.button(
+                            "📋 Copier ce script",
+                            key="copy_script_" + str(vid_id) + "_" + str(idx),
+                            on_click=lambda t=script_txt: st.session_state.update({"_copied_script": t}),
+                        )
+                        if st.session_state.get("_copied_script") == script_txt:
+                            st.code(script_txt, language="")
+                    else:
+                        st.caption("Transcription non disponible pour cette vidéo — relancer l'analyse pour l'obtenir.")
 
     # ── BLOC 6 — Comparaison avec ta base ────────────────────────────────────
     all_my_videos = get_all_videos_with_stats()
