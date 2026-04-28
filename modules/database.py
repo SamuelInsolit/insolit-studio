@@ -516,3 +516,99 @@ def get_best_videos(source_filter="all", limit=10):
         return q.all()
     finally:
         session.close()
+
+
+def get_full_knowledge_context() -> dict:
+    """
+    Retourne le contexte complet de la KB pour enrichir generate_brief().
+    Inclut : scripts_viraux, hooks_performants, patterns_gagnants,
+             videos_references annotées, stats_agregees.
+    """
+    session = get_session()
+    try:
+        ressources = session.query(Ressource).order_by(Ressource.created_at.desc()).all()
+
+        scripts_viraux = []
+        hooks_performants = []
+        patterns_gagnants = []
+        tous_les_contenus = []
+
+        for r in ressources:
+            item = {
+                "id":                r.id,
+                "type":              r.type_ressource,
+                "titre":             r.titre,
+                "contenu":           r.contenu,
+                "performance":       r.performance_tag,
+                "vues":              r.vues_approx,
+                "nb_likes":          r.nb_likes,
+                "nb_enregistrements": r.nb_enregistrements,
+                "taux_completion":   r.taux_completion,
+                "hook_texte":        r.hook_texte,
+                "ce_qui_marche":     r.ce_qui_marche,
+                "a_reproduire":      r.a_reproduire,
+                "contexte":          r.contexte,
+            }
+            tous_les_contenus.append(item)
+
+            if r.performance_tag == "viral":
+                scripts_viraux.append(item)
+            if r.hook_texte:
+                hooks_performants.append({
+                    "hook":          r.hook_texte,
+                    "performance":   r.performance_tag,
+                    "vues":          r.vues_approx,
+                    "ce_qui_marche": r.ce_qui_marche,
+                    "titre_source":  r.titre,
+                })
+            if r.type_ressource == "pattern":
+                patterns_gagnants.append(item)
+
+        # Vidéos annotées (références)
+        videos_annotees = (
+            session.query(Video)
+            .join(Stats)
+            .filter(Stats.performance_tag.isnot(None))
+            .filter(Video.statut_analyse == "complete")
+            .order_by(Stats.vues.desc().nullslast())
+            .limit(20)
+            .all()
+        )
+
+        videos_references = []
+        for v in videos_annotees:
+            ref = {
+                "titre":           v.titre,
+                "performance":     v.stats.performance_tag if v.stats else None,
+                "vues":            v.stats.vues if v.stats else None,
+                "completion_rate": v.stats.completion_rate if v.stats else None,
+                "duree":           v.duree_secondes,
+            }
+            if v.analyse_creative:
+                ref["hook_texte"] = v.analyse_creative.hook_texte
+                ref["hook_type"]  = v.analyse_creative.hook_type
+                ref["hook_score"] = v.analyse_creative.hook_score
+                ref["points_forts"] = v.analyse_creative.points_forts
+            videos_references.append(ref)
+
+        nb_total_annot = len(videos_annotees)
+        nb_viral = sum(1 for v in videos_annotees if v.stats and v.stats.performance_tag == "viral")
+        nb_bon   = sum(1 for v in videos_annotees if v.stats and v.stats.performance_tag == "bon")
+
+        return {
+            "scripts_viraux":    scripts_viraux,
+            "hooks_performants": hooks_performants,
+            "patterns_gagnants": patterns_gagnants,
+            "tous_les_contenus": tous_les_contenus,
+            "videos_references": videos_references,
+            "stats_agregees": {
+                "nb_ressources_kb":    len(ressources),
+                "nb_scripts_viraux":   len(scripts_viraux),
+                "nb_hooks_kb":         len(hooks_performants),
+                "nb_videos_annotees":  nb_total_annot,
+                "nb_viral":            nb_viral,
+                "nb_bon":              nb_bon,
+            },
+        }
+    finally:
+        session.close()

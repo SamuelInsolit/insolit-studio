@@ -325,77 +325,118 @@ def generate_brief(
     ton: str,
     best_videos: list,
     patterns: dict = None,
-    knowledge_base: list = None,
+    knowledge_base: list = None,   # conservé pour compatibilité ascendante
+    full_context: dict = None,     # nouveau : depuis get_full_knowledge_context()
 ) -> tuple[dict, dict]:
     """
-    Génère un brief complet — utilise Sonnet (qualité maximale pour le livrable final).
-    knowledge_base: liste de ressources de la Base de Connaissances (scripts, patterns, guidelines).
+    Génère un brief complet — Sonnet (qualité maximale).
+    Retourne 3-5 hooks VARIÉS + 2+ scripts avec scores de confiance + attribution KB.
     """
-    best_str = json.dumps(best_videos[:4], ensure_ascii=False, indent=2) if best_videos else "[]"
+    best_str = json.dumps(best_videos[:5], ensure_ascii=False, indent=2) if best_videos else "[]"
 
-    # Enrichissement base de connaissances
+    # ── Contexte KB enrichi ────────────────────────────────────────────────────
     kb_section = ""
-    if knowledge_base:
-        # Prioriser: guidelines > scripts viraux > patterns
-        guidelines = [r for r in knowledge_base if r.get("type_ressource") == "guideline"]
-        scripts = [r for r in knowledge_base if r.get("type_ressource") == "script" and r.get("performance_tag") == "viral"]
-        patterns_kb = [r for r in knowledge_base if r.get("type_ressource") == "pattern"]
-        top_kb = (guidelines + scripts + patterns_kb)[:6]  # max 6 ressources
+    ctx = full_context or {}
 
+    if ctx:
+        kb_parts = []
+        stats_agg = ctx.get("stats_agregees", {})
+
+        # 1. Hooks prouvés
+        hooks_kb = ctx.get("hooks_performants", [])
+        if hooks_kb:
+            best_hooks = sorted(
+                hooks_kb,
+                key=lambda h: (0 if h.get("performance") == "viral" else 1, -(h.get("vues") or 0))
+            )[:8]
+            hook_lines = []
+            for h in best_hooks:
+                perf = ("[" + h["performance"].upper() + "]") if h.get("performance") else ""
+                vues = (" " + str(h["vues"]) + " vues") if h.get("vues") else ""
+                ce_qui = (" — " + h["ce_qui_marche"][:80]) if h.get("ce_qui_marche") else ""
+                hook_lines.append("  * " + chr(171) + h["hook"] + chr(187) + " " + perf + vues + ce_qui)
+            kb_parts.append("HOOKS QUI ONT PROUVE LEUR EFFICACITE:\n" + "\n".join(hook_lines))
+
+        # 2. Scripts viraux complets
+        scripts_viraux = ctx.get("scripts_viraux", [])
+        if scripts_viraux:
+            sv_lines = []
+            for r in scripts_viraux[:4]:
+                vues_str = (str(r["vues"]) + " vues") if r.get("vues") else ""
+                likes_str = (str(r["nb_likes"]) + " likes") if r.get("nb_likes") else ""
+                saves_str = (str(r["nb_enregistrements"]) + " saves") if r.get("nb_enregistrements") else ""
+                stats_str = " / ".join(s for s in [vues_str, likes_str, saves_str] if s)
+                sv_lines.append(
+                    "[VIRAL" + (" " + stats_str if stats_str else "") + "] " + (r.get("titre") or "") + "\n"
+                    "HOOK: " + chr(171) + (r.get("hook_texte") or "") + chr(187) + "\n"
+                    "POURQUOI: " + (r.get("ce_qui_marche") or "") + "\n"
+                    "A REPRODUIRE: " + (r.get("a_reproduire") or "") + "\n"
+                    "SCRIPT: " + (r.get("contenu") or "")[:600]
+                )
+            kb_parts.append("SCRIPTS VIRAUX (adapter pour ce partenaire):\n" + "\n---\n".join(sv_lines))
+
+        # 3. Patterns gagnants
+        patterns_kb = ctx.get("patterns_gagnants", [])
+        if patterns_kb:
+            p_lines = ["  - " + (p.get("titre") or "") + ": " + (p.get("contenu") or "")[:150]
+                       for p in patterns_kb[:5]]
+            kb_parts.append("PATTERNS GAGNANTS:\n" + "\n".join(p_lines))
+
+        if kb_parts:
+            nb_r = stats_agg.get("nb_ressources_kb", 0)
+            nb_v = stats_agg.get("nb_videos_annotees", 0)
+            footer = "\n[Base: " + str(nb_r) + " ressources KB + " + str(nb_v) + " videos annotees]"
+            kb_section = "\n\nBASE DE CONNAISSANCES INSOLIT:\n" + "\n\n".join(kb_parts) + footer
+
+    elif knowledge_base:
+        # Fallback ancien format
+        guidelines   = [r for r in knowledge_base if r.get("type_ressource") == "guideline"]
+        scripts_v    = [r for r in knowledge_base if r.get("type_ressource") == "script"
+                        and r.get("performance_tag") == "viral"]
+        patterns_old = [r for r in knowledge_base if r.get("type_ressource") == "pattern"]
+        top_kb = (guidelines + scripts_v + patterns_old)[:6]
         if top_kb:
             kb_lines = []
             for r in top_kb:
                 type_lbl = {"script": "Script", "pattern": "Pattern", "guideline": "Guideline",
-                            "inspiration": "Inspiration", "competitor": "Concurrent"}.get(r.get("type_ressource", ""), "Ressource")
-                perf = f" [{r['performance_tag'].upper()}]" if r.get("performance_tag") else ""
-
-                # Stats complètes si disponibles
-                stats_parts = []
-                if r.get("vues_approx"): stats_parts.append(f"{r['vues_approx']:,} vues")
-                if r.get("nb_likes"):    stats_parts.append(f"{r['nb_likes']:,} likes")
-                if r.get("nb_enregistrements"): stats_parts.append(f"{r['nb_enregistrements']:,} saves")
-                if r.get("taux_completion"): stats_parts.append(f"{r['taux_completion']:.0f}% complétion")
-                # Calcul engagement rate
-                vues_n = r.get("vues_approx") or 0
-                if vues_n > 0:
-                    total_eng = (r.get("nb_likes") or 0) + (r.get("nb_commentaires") or 0) + \
-                                (r.get("nb_partages") or 0) + (r.get("nb_enregistrements") or 0)
-                    eng_rate = round(total_eng / vues_n * 100, 1)
-                    if eng_rate > 0: stats_parts.append(f"{eng_rate}% engagement")
-                stats_str = f" | {' · '.join(stats_parts)}" if stats_parts else ""
-
-                # Ligne de base
-                line = f"[{type_lbl}{perf}{stats_str}] {r['titre']}:"
-
-                # Hook exact
+                            "inspiration": "Inspiration", "competitor": "Concurrent"}.get(
+                            r.get("type_ressource", ""), "Ressource")
+                perf = (" [" + r["performance_tag"].upper() + "]") if r.get("performance_tag") else ""
+                line = "[" + type_lbl + perf + "] " + (r.get("titre") or "")
                 if r.get("hook_texte"):
-                    line += f"\nHOOK: «{r['hook_texte']}»"
-
-                # Ce qui marche + à reproduire (gold mine pour Claude)
+                    line += "\nHOOK: " + chr(171) + r["hook_texte"] + chr(187)
                 if r.get("ce_qui_marche"):
-                    line += f"\nPOURQUOI ÇA MARCHE: {r['ce_qui_marche']}"
+                    line += "\nPOURQUOI: " + r["ce_qui_marche"]
                 if r.get("a_reproduire"):
-                    line += f"\nÀ REPRODUIRE: {r['a_reproduire']}"
-
-                # Script
-                line += f"\nSCRIPT:\n{r['contenu']}"
-
+                    line += "\nA REPRODUIRE: " + r["a_reproduire"]
+                line += "\nSCRIPT: " + (r.get("contenu") or "")
                 kb_lines.append(line)
+            kb_section = "\n\nBASE DE CONNAISSANCES:\n" + "\n---\n".join(kb_lines)
 
-            kb_section = f"\n\nBASE DE CONNAISSANCES INSOLIT (scripts validés avec stats réelles):\n" + "\n---\n".join(kb_lines)
-
-    prompt = f"""Brief de tournage TikTok/Reels pour Insolit (bons plans restaurants IDF).
-
-CONTEXTE:
-- Partenaire: {partenaire} ({type_contenu}) — {ville}
-- Offre: {offre}
-- Objectif: {objectif} | Durée: {duree}s | Ton: {ton}
-
-VIDÉOS QUI ONT MARCHÉ:
-{best_str}{kb_section}
-
-JSON strict (sans markdown):
-{{"hook_suggere":"texte exact","hook_justification":"basé sur quelle vidéo ou ressource","script_complet":[{{"timestamp":"0-3s","texte_a_dire":"...","texte_ecran":"..."}}],"plans":[{{"numero":1,"timestamp":"0-3s","description_precise":"...","conseil_lumiere":"...","conseil_camera":"...","conseil_pratique":"...","difficulte":2,"pourquoi_ce_plan":"..."}}],"duree_totale_estimee":{duree},"temps_tournage_minutes":30,"temps_montage_minutes":45,"niveau_global":"Débutant|Intermédiaire|Avancé","meilleur_moment_publication":"Mardi 18h-20h","mots_cles_a_utiliser":["mot1","mot2"],"mots_a_eviter":["mot1"],"suggestions_bonus":["s1","s2"],"son_tendance_conseil":"conseil musique"}}"""
+    prompt = (
+        "Brief de tournage TikTok/Reels pour Insolit (bons plans restaurants IDF).\n\n"
+        "CONTEXTE:\n"
+        "- Partenaire: " + partenaire + " (" + type_contenu + ") — " + (ville or "Paris") + "\n"
+        "- Offre: " + offre + "\n"
+        "- Objectif: " + objectif + " | Duree: " + str(duree) + "s | Ton: " + ton + "\n\n"
+        "VIDEOS QUI ONT MARCHE:\n" + best_str + kb_section + "\n\n"
+        "MISSION: Genere 3 a 5 hooks VARIES (types differents) + 2 scripts minimum.\n"
+        "Inspire-toi directement des hooks et scripts de la KB si disponible.\n\n"
+        'JSON strict (sans markdown):\n'
+        '{"hooks":[{"id":1,"texte":"texte exact 0-3s","type":"question|promesse|choc|humour|discovery|challenge","score_confiance":85,"inspire_de":"titre ressource KB ou Analyse generale","pourquoi":"pourquoi ce hook marche pour cette offre"}],'
+        '"scripts":[{"hook_id":1,"titre_scenario":"Titre court","score_confiance":80,"lignes":[{"timestamp":"0-3s","texte_a_dire":"...","texte_ecran":"..."}]}],'
+        '"plans":[{"numero":1,"timestamp":"0-3s","description_precise":"...","conseil_lumiere":"...","conseil_camera":"...","conseil_pratique":"...","difficulte":2,"pourquoi_ce_plan":"..."}],'
+        '"duree_totale_estimee":' + str(duree) + ','
+        '"temps_tournage_minutes":30,'
+        '"temps_montage_minutes":45,'
+        '"niveau_global":"Debutant|Intermediaire|Avance",'
+        '"meilleur_moment_publication":"Mardi 18h-20h",'
+        '"mots_cles_a_utiliser":["mot1","mot2"],'
+        '"mots_a_eviter":["mot1"],'
+        '"suggestions_bonus":["s1","s2"],'
+        '"son_tendance_conseil":"conseil musique",'
+        '"avertissements":[]}'
+    )
 
     try:
         text, usage = _call_claude(prompt, max_tokens=4096, model=MODEL_SMART)
