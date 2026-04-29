@@ -281,10 +281,15 @@ def analyze_frames_with_vision(
         return {}, {}
 
 
-def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: list) -> tuple[dict, dict]:
+def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: list,
+                     frames: list = None) -> tuple[dict, dict]:
     """
     Analyse créative — utilise Haiku (10x moins cher que Sonnet).
     Retourne (analyse_dict, usage_dict).
+
+    Si frames est fourni (liste de {"data": base64_jpeg, ...}), Claude reçoit
+    les vraies images de la vidéo pour une analyse visuelle directe.
+    Coût additionnel : ~5 frames × ~300 tokens ≈ +$0.001 (négligeable sur Haiku).
     """
     # Pegasus : on envoie seulement les champs essentiels pour réduire les tokens
     hook = pegasus_data.get("hook_analyse", {})
@@ -322,26 +327,100 @@ def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: lis
             for s in similar_videos[:3]
         )
 
-    prompt = f"""Expert TikTok food IDF. Réponds UNIQUEMENT avec ce JSON valide (sans markdown, sans texte avant/après).
+    _json_schema = ('{"hook_texte":"texte exact dit","hook_visuel":"description visuelle du hook",'
+                    '"hook_type":"question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour",'
+                    '"hook_score":7.5,"hook_analyse":"analyse en 1-2 phrases",'
+                    '"structure_narrative":"description de la structure en string",'
+                    '"points_forts":["point1","point2","point3"],"points_faibles":["faiblesse1","faiblesse2"],'
+                    '"score_potentiel":7.0,"score_justification":"justification courte",'
+                    '"recommandations":["reco1","reco2","reco3"],"comparaison_base":"comparaison courte",'
+                    '"adaptable_insolit":true,"script_adapte":"script adapté Insolit",'
+                    '"plans_a_reproduire":["plan1"],"note_adaptation":"note"}')
 
-HOOK: {hook.get('texte_dit','')} | {hook.get('type_hook','')} | score:{hook.get('score_accroche',5)}
-PLANS ({len(plans_summary)} plans): {json.dumps(plans_summary, ensure_ascii=False)}
-TRANSCRIPT: {texte}
-MOTS: {whisper_data.get('nb_mots',0)} | DÉBIT: {whisper_data.get('debit_parole',0)} mots/s
-
-TYPES OBLIGATOIRES (respecte exactement) :
-- hook_texte, hook_visuel, hook_type, hook_analyse, structure_narrative, comparaison_base, note_adaptation → STRING (jamais un objet)
-- points_forts, points_faibles, recommandations, plans_a_reproduire → ARRAY de strings
-- hook_score, score_potentiel → NUMBER
-- adaptable_insolit → BOOLEAN
-
-{{"hook_texte":"texte exact dit","hook_visuel":"description visuelle du hook","hook_type":"question|prix_choc|exclusivite|curiosite|social_proof|teasing|humour","hook_score":7.5,"hook_analyse":"analyse en 1-2 phrases","structure_narrative":"description de la structure en string","points_forts":["point1","point2","point3"],"points_faibles":["faiblesse1","faiblesse2"],"score_potentiel":7.0,"score_justification":"justification courte","recommandations":["reco1","reco2","reco3"],"comparaison_base":"comparaison courte","adaptable_insolit":true,"script_adapte":"script adapté Insolit","plans_a_reproduire":["plan1"],"note_adaptation":"note"}}"""
+    _data_block = (
+        f"HOOK: {hook.get('texte_dit','')} | {hook.get('type_hook','')} | score:{hook.get('score_accroche',5)}\n"
+        f"PLANS ({len(plans_summary)} plans): {json.dumps(plans_summary, ensure_ascii=False)}\n"
+        f"TRANSCRIPT: {texte}\n"
+        f"MOTS: {whisper_data.get('nb_mots',0)} | DÉBIT: {whisper_data.get('debit_parole',0)} mots/s\n\n"
+        "TYPES OBLIGATOIRES :\n"
+        "- hook_texte, hook_visuel, hook_type, hook_analyse, structure_narrative, comparaison_base, note_adaptation → STRING\n"
+        "- points_forts, points_faibles, recommandations, plans_a_reproduire → ARRAY de strings\n"
+        "- hook_score, score_potentiel → NUMBER\n"
+        "- adaptable_insolit → BOOLEAN\n\n"
+        "Réponds UNIQUEMENT avec ce JSON valide (sans markdown) :\n" + _json_schema
+    )
 
     try:
+        # ── Mode multimodal : Claude voit les vraies images + données techniques ──
+        if frames:
+            client = _get_client()
+            key_frames = frames[:5]   # Max 5 frames — ~300 tokens/image sur Haiku
+
+            content = []
+            # Bloc données techniques (mis en cache si possible)
+            content.append({
+                "type": "text",
+                "text": "Expert TikTok food IDF. Tu analyses cette vidéo avec les vraies images.\n\n" + _data_block,
+                "cache_control": {"type": "ephemeral"},
+            })
+            # Frames réelles
+            for idx, f in enumerate(key_frames):
+                content.append({
+                    "type": "text",
+                    "text": f"\nPlan {idx+1} [{f.get('timestamp_debut',0):.1f}s–{f.get('timestamp_fin',0):.1f}s] :"
+                })
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": f["data"],
+                    }
+                })
+
+            try:
+                response = client.beta.messages.create(
+                    model=MODEL_FAST,
+                    max_tokens=2000,
+                    messages=[{"role": "user", "content": content}],
+                    betas=["prompt-caching-2024-07-31"],
+                )
+            except Exception:
+                content_nc = [{k: v for k, v in blk.items() if k != "cache_control"} for blk in content]
+                response = client.messages.create(
+                    model=MODEL_FAST, max_tokens=2000,
+                    messages=[{"role": "user", "content": content_nc}],
+                )
+
+            raw = response.content[0].text
+            p = PRICES[MODEL_FAST]
+            in_tok      = response.usage.input_tokens
+            out_tok     = response.usage.output_tokens
+            cache_write = getattr(response.usage, "cache_creation_input_tokens", 0)
+            cache_read  = getattr(response.usage, "cache_read_input_tokens", 0)
+            cost = round(
+                (in_tok * p["in"] + out_tok * p["out"] +
+                 cache_write * p.get("cache_write", p["in"]) +
+                 cache_read  * p.get("cache_read", p["in"] * 0.1)) / 1_000_000, 6
+            )
+            usage = {
+                "input_tokens": in_tok, "output_tokens": out_tok,
+                "cache_write_tokens": cache_write, "cache_read_tokens": cache_read,
+                "model": MODEL_FAST, "cout_estime": cost,
+                "vision_reelle": True,
+            }
+            logger.info(f"Analyse créative multimodale ({len(key_frames)} images): ${cost:.5f}")
+            parsed = _parse_json_response(raw)
+            parsed["_vision_reelle"] = True
+            return parsed, usage
+
+        # ── Mode texte seul (fallback si pas de frames) ───────────────────────
+        prompt = "Expert TikTok food IDF. Réponds UNIQUEMENT avec ce JSON valide (sans markdown).\n\n" + _data_block
         text, usage = _call_claude(prompt, max_tokens=2000, model=MODEL_FAST)
         parsed = _parse_json_response(text)
-        logger.info(f"Analyse créative (Haiku): coût={usage['cout_estime']}$ | {usage['input_tokens']}in/{usage['output_tokens']}out")
+        logger.info(f"Analyse créative (Haiku texte): ${usage.get('cout_estime',0):.5f}")
         return parsed, usage
+
     except Exception as e:
         logger.error(f"Erreur analyse Claude: {e}")
         return {"_error": str(e)}, {}

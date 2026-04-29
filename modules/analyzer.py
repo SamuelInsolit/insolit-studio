@@ -5,10 +5,14 @@ import base64
 import logging
 import subprocess
 import time
+import threading
 import certifi
 from pathlib import Path
 from datetime import datetime
 from modules._env import _ROOT  # noqa — charge .env
+
+# ── Sémaphore global — limite à 3 analyses simultanées (rate-limits API + disque) ──
+ANALYSIS_SEMAPHORE = threading.Semaphore(3)
 
 # Fix SSL
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
@@ -230,18 +234,27 @@ def detect_scene_changes(video_path: str, duration: float) -> list:
 MAX_FRAMES_VISION = 12   # Max frames envoyées à Claude Vision — 12 = bon équilibre plans/vitesse
 
 
-def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
+def extract_frames_for_vision(video_path: str, timestamps: list,
+                              screenshots_dir: str = None) -> list:
     """
     Extrait 1 frame par timestamp détecté (au milieu de chaque plan).
     Limite à MAX_FRAMES_VISION pour contrôler le coût Claude Vision.
     Retourne liste de {"data": base64_jpeg, "timestamp": float}.
+
+    Si screenshots_dir est fourni, sauvegarde chaque frame sur disque (gratuit,
+    fait en même temps que l'encodage base64 — pas de passe ffmpeg supplémentaire).
     """
+    import shutil
+
     # Échantillonnage intelligent si trop de plans
     intervals = list(range(len(timestamps) - 1))
     if len(intervals) > MAX_FRAMES_VISION:
         step = len(intervals) / MAX_FRAMES_VISION
         intervals = [int(i * step) for i in range(MAX_FRAMES_VISION)]
         logger.info(f"Sous-échantillonnage: {len(timestamps)-1} plans → {MAX_FRAMES_VISION} frames pour Vision")
+
+    if screenshots_dir:
+        os.makedirs(screenshots_dir, exist_ok=True)
 
     frames = []
     for i in intervals:
@@ -262,6 +275,15 @@ def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
         try:
             subprocess.run(cmd, capture_output=True, timeout=10)
             if os.path.exists(frame_path):
+                # Copier en screenshot AVANT d'encoder (même fichier, 0 coût ffmpeg)
+                if screenshots_dir:
+                    shot_num = len(frames) + 1
+                    shot_dst = os.path.join(screenshots_dir, f"plan_{shot_num:02d}.jpg")
+                    try:
+                        shutil.copy2(frame_path, shot_dst)
+                    except Exception as _se:
+                        logger.debug(f"Screenshot {shot_num} non sauvegardé: {_se}")
+
                 with open(frame_path, "rb") as fh:
                     data = base64.standard_b64encode(fh.read()).decode("utf-8")
                 frames.append({
@@ -277,7 +299,8 @@ def extract_frames_for_vision(video_path: str, timestamps: list) -> list:
         except Exception as e:
             logger.warning(f"Frame {i} échouée: {e}")
 
-    logger.info(f"Frames extraites: {len(frames)} / {len(timestamps)-1} plans détectés")
+    logger.info(f"Frames extraites: {len(frames)} / {len(timestamps)-1} plans"
+                + (f" + screenshots → {screenshots_dir}" if screenshots_dir else ""))
     return frames
 
 
@@ -382,15 +405,18 @@ def analyze_video(
         # ── 3. Préparation (pas de compression — ffmpeg lit directement) ────────
         working_path = compress_video(video_path, step)  # no-op, retourne original
 
-        # ── 4. Sampling + extraction frames ──────────────────────────────────
+        # ── 4. Sampling + extraction frames (+ screenshots sauvegardés en même temps) ──
         mode_label = "⚡ rapide" if quick_mode else "🔬 complet"
         step(f"📸 Extraction des frames ({mode_label})...")
         scene_timestamps = detect_scene_changes(working_path, duree)
-        frames = extract_frames_for_vision(working_path, scene_timestamps)
+        # Screenshots sauvegardés PENDANT l'extraction — même passe ffmpeg, 0 coût extra
+        screenshots_dir = os.path.join(SCREENSHOTS_PATH, str(video_id))
+        frames = extract_frames_for_vision(working_path, scene_timestamps,
+                                           screenshots_dir=screenshots_dir)
         # Mode rapide : limiter à 5 frames pour réduire coût et temps
         if quick_mode and len(frames) > 5:
             frames = frames[:5]
-        step(f"📸 {len(frames)} frames extraites ({mode_label})")
+        step(f"📸 {len(frames)} frames extraites ({mode_label}) + screenshots")
 
         # ── 5. Vision (Claude) + Whisper en PARALLÈLE ───────────────────────
         step(f"🎬 Analyse Vision + 📝 Transcription en parallèle...")
@@ -521,9 +547,14 @@ def analyze_video(
         # Note: skippé ici pour garder < 30s. Le refaire manuellement si besoin.
         similar_videos = []
 
-        # ── 8. Analyse créative Claude ───────────────────────────────────────
-        step("🧠 Analyse créative (Claude Haiku)...")
-        creative_data, claude_usage = analyze_creative(pegasus_data, whisper_result, similar_videos)
+        # ── 8. Analyse créative Claude (avec les vraies images = plus précis) ─────
+        step("🧠 Analyse créative (Claude Haiku + images réelles)...")
+        # On envoie les frames déjà en mémoire (max 5 pour équilibre coût/qualité)
+        frames_for_creative = frames[:5] if frames else []
+        creative_data, claude_usage = analyze_creative(
+            pegasus_data, whisper_result, similar_videos,
+            frames=frames_for_creative
+        )
         if claude_usage:
             total_cout += claude_usage.get("cout_estime", 0)
 
@@ -549,16 +580,18 @@ def analyze_video(
         video.titre = titre_auto
         session.commit()
 
-        # ── 9. Screenshots skippés (extraits on-demand depuis la bibliothèque) ──
-        # Évite 5-10s de traitement ffmpeg non bloquant pour l'utilisateur
-        pass
+        # ── 9. Screenshots : déjà sauvegardés pendant extract_frames_for_vision ──
+        # Chaque frame = screenshot → ./screenshots/{video_id}/plan_XX.jpg
 
         # ── 10. Finalisation ──────────────────────────────────────────────────
         video.statut_analyse = "complete"
         session.commit()
 
         elapsed = round(time.time() - start_time)
-        step(f"✅ Terminé en {elapsed}s | Coût : ~${total_cout:.4f}")
+        # Temps séquentiel estimé = Vision + Whisper si non parallèles (~20s chacun)
+        # En parallèle on économise ~min(dur_vision, dur_whisper) ≈ 15-20s
+        sequential_estimate = elapsed + 15
+        step(f"✅ Terminé en {elapsed}s | ~{sequential_estimate - elapsed}s économisés (parallèle) | Coût : ~${total_cout:.4f}")
 
         return {
             "success": True,
@@ -571,7 +604,9 @@ def analyze_video(
             "similar_videos": similar_videos,
             "plans_count": len(plans_data),
             "elapsed": elapsed,
+            "elapsed_saved": sequential_estimate - elapsed,
             "cout_total": total_cout,
+            "screenshots_dir": screenshots_dir,
         }
 
     except Exception as e:

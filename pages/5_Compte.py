@@ -696,7 +696,17 @@ if "compte_preview" in st.session_state:
         progress_global = st.progress(0)
         status_global   = st.empty()
 
-        from modules.analyzer import analyze_video
+        from modules.analyzer import analyze_video, ANALYSIS_SEMAPHORE
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from modules.database import Stats, Video as _VideoModel, compute_engagement_ratios
+        from datetime import datetime as _dt
+
+        _JOURS = {
+            "Monday": "lundi", "Tuesday": "mardi",
+            "Wednesday": "mercredi", "Thursday": "jeudi",
+            "Friday": "vendredi", "Saturday": "samedi",
+            "Sunday": "dimanche"
+        }
 
         analyses_results = []
         errors = []
@@ -704,144 +714,162 @@ if "compte_preview" in st.session_state:
         progress_container = st.empty()
         video_status = st.empty()
 
-        for i, vid in enumerate(videos_list):
-            pct = 5 + int((i / nb_found) * 85)
-            progress_global.progress(pct)
+        # ── Fonction de travail par vidéo (s'exécute dans un thread) ─────────
+        def _analyze_one(vid_item):
+            """Analyse une vidéo + sauvegarde Stats/Video — thread-safe (session propre)."""
+            url_v = vid_item.get("url", "")
+            if not url_v:
+                return {"error": "URL manquante", "vid": vid_item}
 
-            elapsed = time.time() - start_time
-            reste = (elapsed / max(i, 1)) * (nb_found - i) if i > 0 else 0
-            reste_min = int(reste // 60)
-            reste_sec = int(reste % 60)
-
-            progress_container.markdown(
-                '<div class="card card-cyan">'
-                '<strong>Analyse en cours : ' + str(i+1) + '/' + str(nb_found) + ' vidéos</strong><br>'
-                '<div style="background:#111;border-radius:4px;height:6px;margin:8px 0;">'
-                '<div style="background:linear-gradient(90deg,#0000ff,#01f0fc,#ff00a4);'
-                'width:' + str(int((i / nb_found) * 100)) + '%;height:6px;border-radius:4px;"></div>'
-                '</div>'
-                'Temps restant estimé : ~' + str(reste_min) + 'min ' + str(reste_sec) + 's'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
-            url_video = vid.get("url", "")
-            if not url_video:
-                errors.append("Vidéo " + str(i+1) + ": URL manquante")
-                continue
-
-            video_status.markdown("⬇️ Vidéo " + str(i+1) + "/" + str(nb_found)
-                                  + " : " + (vid.get("titre", "") or "")[:60] + "...")
-
-            metadata = {
+            meta = {
                 "type_source": type_source,
                 "nom_compte":  username,
                 "categorie":   categorie,
                 "partenaire":  "",
                 "ville":       "",
             }
+            use_quick = (mode_analyse == "pires") or vid_item.get("_mode_pires", False)
 
+            # Sémaphore : max 3 analyses simultanées (rate-limits API)
+            with ANALYSIS_SEMAPHORE:
+                res = analyze_video(source=url_v, metadata=meta,
+                                    is_url=True, quick_mode=use_quick)
+
+            if not res.get("success"):
+                return {"error": res.get("error", "Erreur inconnue"), "vid": vid_item}
+
+            vid_id = res["video_id"]
+
+            # ── DB : Stats + Video (jour, son) — session dédiée à ce thread ──
+            sess_t = get_session()
             try:
-                # Mode pires → quick_mode (5 frames au lieu de 12) = ~50% moins cher
-                use_quick = (mode_analyse == "pires") or vid.get("_mode_pires", False)
-                result = analyze_video(
-                    source=url_video, metadata=metadata,
-                    is_url=True, quick_mode=use_quick
-                )
-                if result.get("success"):
-                    from modules.database import Stats, Video as _VideoModel, compute_engagement_ratios
+                if vid_item.get("vues") or vid_item.get("likes"):
+                    stats_t = Stats(
+                        video_id=vid_id,
+                        vues=vid_item.get("vues"),
+                        likes=vid_item.get("likes"),
+                        comments=vid_item.get("comments"),
+                    )
+                    stats_t.performance_tag = (
+                        "mauvais" if vid_item.get("_mode_pires")
+                        else _auto_tag(vid_item, mode_analyse)
+                    )
+                    compute_engagement_ratios(stats_t)
+                    sess_t.add(stats_t)
 
-                    # ── Session unique : Stats + Video (jour, son) ───────────
-                    _JOURS = {
-                        "Monday": "lundi", "Tuesday": "mardi",
-                        "Wednesday": "mercredi", "Thursday": "jeudi",
-                        "Friday": "vendredi", "Saturday": "samedi",
-                        "Sunday": "dimanche"
-                    }
-                    sess_all = get_session()
-                    try:
-                        # Stats + annotation auto selon mode
-                        if vid.get("vues") or vid.get("likes"):
-                            stats = Stats(
-                                video_id=result["video_id"],
-                                vues=vid.get("vues"),
-                                likes=vid.get("likes"),
-                                comments=vid.get("comments"),
-                            )
-                            stats.performance_tag = (
-                                "mauvais" if vid.get("_mode_pires")
-                                else _auto_tag(vid, mode_analyse)
-                            )
-                            compute_engagement_ratios(stats)
-                            sess_all.add(stats)
-
-                        # Mise à jour Video (jour + son) en un seul .get()
-                        video_obj = sess_all.query(_VideoModel).filter_by(
-                            id=result["video_id"]
-                        ).first()
-                        if video_obj:
-                            # Jour de publication
-                            date_str = vid.get("date", "")
-                            if date_str and len(date_str) == 8:
-                                try:
-                                    from datetime import datetime as _dt
-                                    d = _dt.strptime(date_str, "%Y%m%d")
-                                    video_obj.jour_publication = _JOURS.get(
-                                        d.strftime("%A"), d.strftime("%A").lower()
-                                    )
-                                except Exception as exc2:
-                                    logger.warning("jour_publication: " + str(exc2))
-                            # Son/musique
-                            music_track  = vid.get("music_track", "")
-                            music_author = vid.get("music_author", "")
-                            if music_track or music_author:
-                                video_obj.nom_son      = str(music_track)[:500]  if music_track  else ""
-                                video_obj.auteur_son   = str(music_author)[:200] if music_author else ""
-                                video_obj.son_original = bool(vid.get("is_original_sound", False))
-
-                        sess_all.commit()
-                    except Exception as exc_db:
-                        sess_all.rollback()
-                        logger.warning("DB enrichissement vidéo: " + str(exc_db))
-                    finally:
-                        sess_all.close()
-
-                    # Commentaires
-                    if recuperer_commentaires:
+                vo = sess_t.query(_VideoModel).filter_by(id=vid_id).first()
+                if vo:
+                    date_str = vid_item.get("date", "")
+                    if date_str and len(date_str) == 8:
                         try:
-                            fetch_and_store_comments(
-                                url_video, result["video_id"], get_ytdlp_cookie_args()
-                            )
-                        except Exception as exc4:
-                            logger.warning("commentaires: " + str(exc4))
+                            d = _dt.strptime(date_str, "%Y%m%d")
+                            vo.jour_publication = _JOURS.get(
+                                d.strftime("%A"), d.strftime("%A").lower())
+                        except Exception:
+                            pass
+                    mt = vid_item.get("music_track", "")
+                    ma = vid_item.get("music_author", "")
+                    if mt or ma:
+                        vo.nom_son      = str(mt)[:500] if mt else ""
+                        vo.auteur_son   = str(ma)[:200] if ma else ""
+                        vo.son_original = bool(vid_item.get("is_original_sound", False))
+                sess_t.commit()
+            except Exception as exc_db:
+                sess_t.rollback()
+                logger.warning("DB thread: " + str(exc_db))
+            finally:
+                sess_t.close()
 
-                    analyses_results.append({
-                        "video_id":      result.get("video_id"),
-                        "titre":         result.get("titre"),
-                        "url":           url_video,
-                        "vues":          vid.get("vues"),
-                        "likes":         vid.get("likes"),
-                        "duree":         vid.get("duree"),
-                        "cout":          result.get("cout_total", 0),
-                        "pegasus":       result.get("pegasus_data", {}),
-                        "whisper_texte": result.get("whisper_data", {}).get("texte_complet", ""),
-                        "creative":      result.get("creative_data", {}),
-                        "nb_plans":      result.get("plans_count", 0),
-                        "score_potentiel": result.get("creative_data", {}).get("score_potentiel"),
-                        "hook_texte":    result.get("creative_data", {}).get("hook_texte"),
-                        "hook_score":    result.get("creative_data", {}).get("hook_score"),
-                        "mode":          mode_analyse,
-                        "perf_tag":      "mauvais" if vid.get("_mode_pires") else _auto_tag(vid, mode_analyse),
-                    })
+            # Commentaires (si option activée)
+            if recuperer_commentaires:
+                try:
+                    fetch_and_store_comments(url_v, vid_id, get_ytdlp_cookie_args())
+                except Exception as exc_c:
+                    logger.warning("commentaires: " + str(exc_c))
+
+            perf_tag = "mauvais" if vid_item.get("_mode_pires") else _auto_tag(vid_item, mode_analyse)
+            return {
+                "video_id":        vid_id,
+                "titre":           res.get("titre"),
+                "url":             url_v,
+                "vues":            vid_item.get("vues"),
+                "likes":           vid_item.get("likes"),
+                "duree":           vid_item.get("duree"),
+                "cout":            res.get("cout_total", 0),
+                "elapsed":         res.get("elapsed", 0),
+                "pegasus":         res.get("pegasus_data", {}),
+                "whisper_texte":   res.get("whisper_data", {}).get("texte_complet", ""),
+                "creative":        res.get("creative_data", {}),
+                "nb_plans":        res.get("plans_count", 0),
+                "score_potentiel": res.get("creative_data", {}).get("score_potentiel"),
+                "hook_texte":      res.get("creative_data", {}).get("hook_texte"),
+                "hook_score":      res.get("creative_data", {}).get("hook_score"),
+                "mode":            mode_analyse,
+                "perf_tag":        perf_tag,
+                "vision_reelle":   res.get("creative_data", {}).get("_vision_reelle", False),
+            }
+
+        # ── Lancement 3 vidéos en parallèle (semaphore protège les APIs) ─────
+        MAX_WORKERS = 3
+        status_global.markdown(
+            f"**⚡ Analyse de {nb_found} vidéos — {MAX_WORKERS} en parallèle...**"
+        )
+
+        completed_count = 0
+        futures_map = {}
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for vid in videos_list:
+                f = executor.submit(_analyze_one, vid)
+                futures_map[f] = vid
+
+            for future in as_completed(futures_map):
+                completed_count += 1
+                pct = 5 + int((completed_count / nb_found) * 85)
+                progress_global.progress(pct)
+
+                elapsed_t = time.time() - start_time
+                reste_t   = (elapsed_t / completed_count) * (nb_found - completed_count)
+                reste_min = int(reste_t // 60)
+                reste_sec = int(reste_t % 60)
+
+                progress_container.markdown(
+                    '<div class="card card-cyan">'
+                    '<strong>⚡ ' + str(completed_count) + '/' + str(nb_found)
+                    + ' vidéos terminées</strong>'
+                    + (' · ' + str(nb_found - completed_count) + ' en cours' if nb_found - completed_count > 0 else '')
+                    + '<br>'
+                    '<div style="background:#111;border-radius:4px;height:6px;margin:8px 0;">'
+                    '<div style="background:linear-gradient(90deg,#0000ff,#01f0fc,#ff00a4);'
+                    'width:' + str(int((completed_count / nb_found) * 100)) + '%;height:6px;border-radius:4px;"></div>'
+                    '</div>'
+                    + ('Temps restant : ~' + str(reste_min) + 'min ' + str(reste_sec) + 's'
+                       if reste_t > 0 else 'Finalisation...')
+                    + '</div>',
+                    unsafe_allow_html=True,
+                )
+
+                try:
+                    res_item = future.result()
+                except Exception as exc_f:
+                    errors.append("Thread exception: " + str(exc_f))
+                    logger.error("Thread exception", exc_info=True)
+                    continue
+
+                if "error" in res_item:
+                    errors.append(res_item.get("vid", {}).get("titre", "?") + ": " + res_item["error"])
                 else:
-                    errors.append("Vidéo " + str(i+1) + ": " + str(result.get("error", "Erreur inconnue")))
-                    logger.warning("Vidéo " + str(i+1) + " échouée: " + str(result.get("error")))
-            except Exception as exc:
-                errors.append("Vidéo " + str(i+1) + ": " + str(exc))
-                logger.error("Vidéo " + str(i+1) + " exception: " + str(exc), exc_info=True)
+                    analyses_results.append(res_item)
+                    titre_short = (res_item.get("titre") or "")[:50]
+                    video_status.markdown("✅ " + titre_short + " — "
+                                         + str(res_item.get("elapsed", 0)) + "s"
+                                         + (" 👁 vision réelle" if res_item.get("vision_reelle") else ""))
 
-            if i < nb_found - 1:
-                time.sleep(2)  # 2s suffit — était 3s
+        # Temps économisé (estimé séquentiel vs parallèle)
+        elapsed_total_parallel = int(time.time() - start_time)
+        avg_per_video = elapsed_total_parallel / max(len(analyses_results), 1)
+        sequential_estimate = int(avg_per_video * nb_found)
+        time_saved = max(0, sequential_estimate - elapsed_total_parallel)
 
         progress_global.progress(90)
         video_status.empty()
@@ -881,10 +909,13 @@ if "compte_preview" in st.session_state:
         total_cout += claude_usage.get("cout_estime", 0)
 
         progress_global.progress(100)
+        _saved_str = (f" | ⚡ ~{time_saved // 60}min {time_saved % 60}s économisés (parallèle ×{MAX_WORKERS})"
+                      if time_saved > 10 else "")
         status_global.success(
             "✅ " + str(len(analyses_results)) + "/" + str(nb_found) + " vidéos analysées | "
             "Coût total : ~$" + str(round(total_cout, 3))
-            + " | Durée : " + str(elapsed_total // 60) + "min " + str(elapsed_total % 60) + "s"
+            + " | Durée : " + str(elapsed_total_parallel // 60) + "min " + str(elapsed_total_parallel % 60) + "s"
+            + _saved_str
         )
         if errors:
             with st.expander("⚠️ " + str(len(errors)) + " erreurs"):
@@ -898,7 +929,8 @@ if "compte_preview" in st.session_state:
             "analyses":     analyses_results,
             "rapport":      rapport,
             "total_cout":   total_cout,
-            "elapsed":      elapsed_total,
+            "elapsed":      elapsed_total_parallel,
+            "time_saved":   time_saved,
             "mode":         mode_analyse,
         }
         if "compte_preview" in st.session_state:

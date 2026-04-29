@@ -599,6 +599,111 @@ def delete_video(video_id: int) -> dict:
         session.close()
 
 
+def get_video_analysis_from_db(video_id: int) -> dict:
+    """
+    Recharge tous les résultats d'une vidéo déjà analysée depuis la DB.
+    Retourne un dict compatible avec le retour de analyze_video().
+    Utilisé pour le cache URL (afficher les résultats sans re-analyser).
+    """
+    from sqlalchemy.orm import joinedload
+    session = get_session()
+    try:
+        v = (
+            session.query(Video)
+            .options(
+                joinedload(Video.analyse_pegasus),
+                joinedload(Video.analyse_creative),
+                joinedload(Video.transcription),
+                joinedload(Video.plans),
+                joinedload(Video.stats),
+            )
+            .filter_by(id=video_id)
+            .first()
+        )
+        if not v:
+            return {"success": False, "error": "Vidéo introuvable"}
+
+        # Reconstruire pegasus_data depuis raw_json
+        pegasus_data = {}
+        if v.analyse_pegasus and v.analyse_pegasus.raw_json:
+            try:
+                pegasus_data = json.loads(v.analyse_pegasus.raw_json)
+            except Exception:
+                pass
+
+        # Reconstruire creative_data
+        creative_data = {}
+        if v.analyse_creative:
+            ac = v.analyse_creative
+            creative_data = {
+                "hook_texte":          ac.hook_texte,
+                "hook_visuel":         ac.hook_visuel,
+                "hook_type":           ac.hook_type,
+                "hook_score":          ac.hook_score,
+                "hook_analyse":        ac.hook_analyse,
+                "structure_narrative": ac.structure_narrative,
+                "points_forts":        ac.points_forts,
+                "points_faibles":      ac.points_faibles,
+                "score_potentiel":     ac.score_potentiel,
+                "recommandations":     ac.recommandations,
+                "comparaison_base":    ac.comparaison_base,
+                "adaptable_insolit":   ac.adaptable_insolit,
+                "note_adaptation":     ac.note_adaptation,
+            }
+
+        # Reconstruire whisper_data depuis transcription
+        mots = []
+        for t in sorted(v.transcription or [], key=lambda x: x.timestamp or 0):
+            mots.append({"start": t.timestamp, "mot": t.mot, "confiance": t.confiance})
+        texte_complet = " ".join(m["mot"] for m in mots)
+        whisper_data = {
+            "mots": mots,
+            "texte_complet": texte_complet,
+            "nb_mots": len(mots),
+            "debit_parole": 0,
+            "silences": [],
+            "langue": "fr",
+        }
+
+        # Plans
+        plans_list = []
+        for p in sorted(v.plans or [], key=lambda x: x.numero_plan or 0):
+            plans_list.append({
+                "timestamp_debut": p.timestamp_debut,
+                "timestamp_fin":   p.timestamp_fin,
+                "type_plan":       p.type_plan,
+                "sujet_principal": p.description,
+                "luminosite":      p.luminosite,
+                "mouvement_camera": p.mouvement,
+                "presence_visage": p.presence_visage,
+                "expression_visage": p.expression,
+                "texte_visible_ecran": p.texte_visible,
+                "role_narratif":   p.role_narratif,
+                "points_forts":    p.points_forts,
+                "changement_scene": p.changement_scene,
+                "personnes":       p.personnes,
+            })
+        if plans_list:
+            pegasus_data["plans"] = plans_list
+
+        return {
+            "success":      True,
+            "from_cache":   True,
+            "video_id":     v.id,
+            "titre":        v.titre,
+            "duree_secondes": v.duree_secondes,
+            "pegasus_data": pegasus_data,
+            "whisper_data": whisper_data,
+            "creative_data": creative_data,
+            "similar_videos": [],
+            "plans_count":  len(plans_list),
+            "elapsed":      0,
+            "cout_total":   0,
+        }
+    finally:
+        session.close()
+
+
 def compute_engagement_ratios(stats_obj):
     """Amélioration 5 — Calcule et stocke les ratios d'engagement en place."""
     vues = stats_obj.vues or 0

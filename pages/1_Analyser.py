@@ -89,9 +89,9 @@ if launch_analysis:
         st.error("Fournis une URL ou un fichier vidéo.")
         st.stop()
 
-    # ── Opt 1 — Anti-doublons ────────────────────────────────────────────────
+    # ── Opt 1 — Cache URL : résultats instantanés si déjà analysée ─────────
     if has_url:
-        from modules.database import get_session, Video as _Video
+        from modules.database import get_session, Video as _Video, get_video_analysis_from_db
         _dup_session = get_session()
         try:
             _existing = _dup_session.query(_Video).filter_by(url_source=video_url.strip()).first()
@@ -99,17 +99,43 @@ if launch_analysis:
             _dup_session.close()
 
         if _existing:
-            st.warning(
-                f"⚠️ **Cette URL a déjà été analysée** (vidéo #{_existing.id} — "
-                f"*{(_existing.titre or 'Sans titre')[:50]}*)  \n"
-                "Tu peux la retrouver dans ta **📚 Bibliothèque**."
-            )
-            col_force, col_cancel = st.columns(2)
-            with col_force:
-                force_reanalyze = st.button("🔄 Ré-analyser quand même", key="force_reanalyze")
-            with col_cancel:
-                if st.button("📚 Voir dans la bibliothèque", key="goto_biblio"):
+            # Bannière cache
+            st.markdown(f"""
+            <div style="background:#001a0a;border:1px solid #00C853;border-left:4px solid #00C853;
+                        border-radius:10px;padding:0.8rem 1.2rem;margin-bottom:0.8rem;">
+                <div style="color:#00C853;font-weight:700;font-size:0.88em;">
+                    ⚡ RÉSULTAT INSTANTANÉ — Déjà dans ta base
+                </div>
+                <div style="color:#aaa;font-size:0.82em;margin-top:2px;">
+                    Vidéo #{_existing.id} · <em>{(_existing.titre or 'Sans titre')[:55]}</em>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_cache_a, col_cache_b, col_cache_c = st.columns(3)
+            with col_cache_a:
+                show_cached = st.button("📊 Voir les résultats", key="show_cached",
+                                        use_container_width=True, type="primary")
+            with col_cache_b:
+                force_reanalyze = st.button("🔄 Ré-analyser", key="force_reanalyze",
+                                            use_container_width=True)
+            with col_cache_c:
+                if st.button("📚 Bibliothèque", key="goto_biblio", use_container_width=True):
                     st.switch_page("pages/2_Bibliotheque.py")
+
+            if show_cached:
+                # Charger depuis DB et afficher directement
+                _cached = get_video_analysis_from_db(_existing.id)
+                if _cached.get("success"):
+                    st.session_state["last_analysis"] = _cached
+                    st.session_state["last_analysis_meta"] = {
+                        "categorie": categorie,
+                        "type_source": type_map.get(type_source, "inspiration"),
+                    }
+                    st.rerun()
+                else:
+                    st.error("Impossible de charger les résultats — " + _cached.get("error", ""))
+
             if not force_reanalyze:
                 st.stop()
 
@@ -268,10 +294,14 @@ if launch_analysis:
     st.session_state["last_analysis_meta"] = metadata  # pour KB matching
     m, s = divmod(elapsed_total, 60)
     cout = result.get("cout_total", 0)
+    saved = result.get("elapsed_saved", 0)
+    saved_str = f" | ⚡ ~{saved}s économisés (parallèle)" if saved > 5 else ""
+    vision_str = " | 👁 Vision réelle" if result.get("creative_data", {}).get("_vision_reelle") else ""
     st.success(
-        f"✅ Analysé en **{m}:{s:02d}** "
-        f"| {result.get('plans_count', 0)} plans détectés "
-        f"| Coût ~${cout:.4f}"
+        f"✅ Analysé en **{m}:{s:02d}**"
+        f" | {result.get('plans_count', 0)} plans"
+        f" | Coût ~${cout:.4f}"
+        + saved_str + vision_str
     )
 
 # ─── Section D — Résultats ────────────────────────────────────────────────────
@@ -286,6 +316,17 @@ if "last_analysis" in st.session_state:
     plans     = pegasus.get("plans", [])
 
     st.markdown("---")
+    # Badge "depuis le cache" si résultat instantané
+    if result.get("from_cache"):
+        st.markdown("""
+        <div style="background:#001a0a;border:1px solid #00C853;border-radius:8px;
+                    padding:0.5rem 1rem;margin-bottom:0.5rem;display:inline-block;font-size:0.82em;">
+            ⚡ <strong style="color:#00C853;">Résultat depuis le cache</strong>
+            &nbsp;·&nbsp; <span style="color:#888;">0s · $0.000</span>
+            &nbsp;·&nbsp; <a href="#" onclick="window.location.reload();" style="color:#ff00a4;">
+            🔄 Ré-analyser</a>
+        </div>
+        """, unsafe_allow_html=True)
     st.markdown(f"## 📋 {result.get('titre', 'Résultats')}")
 
     # ── BLOC 1 — Rapport exécutif ─────────────────────────────────────────────
