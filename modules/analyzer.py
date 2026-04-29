@@ -33,47 +33,171 @@ if _add:
 
 logger = logging.getLogger(__name__)
 
-VOLUME_PATH    = os.getenv("RAILWAY_VOLUME_PATH", "./uploads")
+VOLUME_PATH      = os.getenv("RAILWAY_VOLUME_PATH", "./uploads")
 SCREENSHOTS_PATH = "./screenshots"
-IS_RAILWAY     = os.getenv("RAILWAY_ENVIRONMENT") is not None or os.path.exists("/usr/bin/ffmpeg")
+IS_RAILWAY       = os.getenv("RAILWAY_ENVIRONMENT") is not None or os.path.exists("/usr/bin/ffmpeg")
 
-# ── Cookie TikTok/IG pour Railway ────────────────────────────────────────────
-# En local  : --cookies-from-browser chrome (automatique)
-# Railway   : TIKTOK_COOKIES_B64 = contenu cookies.txt encodé en base64
-#             → décodé au premier appel, écrit dans /tmp/tiktok_cookies.txt
-_COOKIES_FILE_CACHE: str | None = None   # chemin résolu, None = pas encore tenté
+# ── Fichier cookies TikTok persistant (priorité 1) ───────────────────────────
+# Uploadé via l'UI Streamlit → sauvegardé dans VOLUME_PATH (volume Railway).
+# Priorité : COOKIES_FILE > TIKTOK_COOKIES_B64 (env var) > browser (local) > rien
+COOKIES_FILE = os.path.join(VOLUME_PATH, "tiktok_cookies.txt")
+
+_COOKIES_FILE_CACHE: str | None = None   # chemin résolu pour la session courante
+
+
+def reset_cookie_cache():
+    """Force la re-résolution des cookies (appeler après upload d'un nouveau fichier)."""
+    global _COOKIES_FILE_CACHE
+    _COOKIES_FILE_CACHE = None
+
 
 def get_ytdlp_cookie_args() -> list:
     """
     Retourne les args yt-dlp corrects pour l'authentification TikTok/IG.
-    Local   → ['--cookies-from-browser', 'chrome']
-    Railway → ['--cookies', '/tmp/tiktok_cookies.txt']  si TIKTOK_COOKIES_B64 défini
-    Railway → []  sinon (user-agent fallback, marche souvent pour TikTok public)
+
+    Priorité :
+    1. COOKIES_FILE dans VOLUME_PATH (uploadé via l'UI — le plus récent)
+    2. TIKTOK_COOKIES_B64 (env var Railway — fallback initial)
+    3. --cookies-from-browser chrome (en local seulement)
+    4. Rien (mode dégradé — stats souvent fausses sur TikTok)
     """
     global _COOKIES_FILE_CACHE
 
+    # Si déjà résolu dans cette session, on réutilise
+    if _COOKIES_FILE_CACHE and os.path.exists(_COOKIES_FILE_CACHE):
+        return ["--cookies", _COOKIES_FILE_CACHE]
+
+    # 1. Fichier uploadé via UI (volume persistant Railway)
+    if os.path.exists(COOKIES_FILE):
+        _COOKIES_FILE_CACHE = COOKIES_FILE
+        logger.info("Cookies TikTok chargés depuis " + COOKIES_FILE)
+        return ["--cookies", COOKIES_FILE]
+
+    # 2. Variable d'environnement base64 (méthode Railway historique)
+    b64 = os.getenv("TIKTOK_COOKIES_B64", "").strip()
+    if b64:
+        import base64 as _b64
+        tmp_path = "/tmp/tiktok_cookies_b64.txt"
+        try:
+            with open(tmp_path, "w") as f:
+                f.write(_b64.b64decode(b64).decode("utf-8"))
+            _COOKIES_FILE_CACHE = tmp_path
+            logger.info("Cookies TikTok chargés depuis TIKTOK_COOKIES_B64")
+            return ["--cookies", tmp_path]
+        except Exception as e:
+            logger.warning("Impossible de décoder TIKTOK_COOKIES_B64: " + str(e))
+
+    # 3. Navigateur local
     if not IS_RAILWAY:
         return ["--cookies-from-browser", "chrome"]
 
-    # Si déjà résolu, on réutilise
-    if _COOKIES_FILE_CACHE:
-        return ["--cookies", _COOKIES_FILE_CACHE]
+    # 4. Aucun cookie — stats TikTok non authentifiées (souvent fausses)
+    logger.warning("Aucun cookie TikTok configuré — stats potentiellement incorrectes")
+    return []
 
+
+def get_cookies_status() -> dict:
+    """
+    Vérifie rapidement l'état des cookies TikTok sans appel réseau.
+    Retourne {"status": "ok"|"missing"|"suspect", "source": ..., "details": ...}
+    """
+    # 1. Fichier uploadé via UI
+    if os.path.exists(COOKIES_FILE):
+        return _parse_cookies_status(COOKIES_FILE, source="UI upload")
+
+    # 2. Variable d'environnement
     b64 = os.getenv("TIKTOK_COOKIES_B64", "").strip()
     if b64:
-        import base64
-        cookies_path = "/tmp/tiktok_cookies.txt"
+        import base64 as _b64
+        tmp = "/tmp/tiktok_cookies_b64.txt"
         try:
-            with open(cookies_path, "w") as f:
-                f.write(base64.b64decode(b64).decode("utf-8"))
-            _COOKIES_FILE_CACHE = cookies_path
-            logger.info("Cookies TikTok chargés depuis TIKTOK_COOKIES_B64")
-            return ["--cookies", cookies_path]
-        except Exception as e:
-            logger.warning(f"Impossible de décoder TIKTOK_COOKIES_B64: {e}")
+            with open(tmp, "w") as f:
+                f.write(_b64.b64decode(b64).decode("utf-8"))
+            return _parse_cookies_status(tmp, source="env var TIKTOK_COOKIES_B64")
+        except Exception:
+            pass
+        return {"status": "suspect", "source": "env var", "details": "Impossible de décoder TIKTOK_COOKIES_B64"}
 
-    # Fallback sans cookies — user-agent mobile, marche pour TikTok public
-    return []
+    # 3. Local sans Railway
+    if not IS_RAILWAY:
+        return {"status": "ok", "source": "navigateur", "details": "--cookies-from-browser chrome (local)"}
+
+    return {"status": "missing", "source": "aucun", "details": "Aucun cookie configuré"}
+
+
+def _parse_cookies_status(path: str, source: str) -> dict:
+    """Lit le fichier cookies et cherche les clés TikTok essentielles."""
+    try:
+        with open(path) as f:
+            content = f.read()
+    except Exception as e:
+        return {"status": "missing", "source": source, "details": "Fichier illisible: " + str(e)}
+
+    # Le cookie le plus critique pour l'auth TikTok
+    essential = ["sessionid"]
+    helpful   = ["tt_chain_token", "msToken", "tiktok_webapp_theme"]
+
+    has_essential = any(k in content for k in essential)
+    has_helpful   = any(k in content for k in helpful)
+
+    if has_essential:
+        found = [k for k in essential + helpful if k in content]
+        return {
+            "status":  "ok",
+            "source":  source,
+            "details": "Cookies présents : " + ", ".join(found),
+            "file":    path,
+        }
+    elif has_helpful:
+        return {
+            "status":  "suspect",
+            "source":  source,
+            "details": "sessionid manquant — cookies partiels ou expirés",
+            "file":    path,
+        }
+    else:
+        return {
+            "status":  "suspect",
+            "source":  source,
+            "details": "Aucun cookie TikTok reconnu — fichier incorrect ou expiré",
+            "file":    path,
+        }
+
+
+def validate_tiktok_cookies_live(cookie_args: list, test_url: str = None) -> dict:
+    """
+    Validation en temps réel : interroge une vidéo TikTok connue pour populaire.
+    Compare si les vues retournées sont plausibles (> 10 000).
+    Retourne {"valid": bool, "vues_retournees": int, "message": str}
+    """
+    # Vidéo de test : une vidéo TikTok très populaire et stable
+    test_url = test_url or "https://www.tiktok.com/@tiktok/video/6829267836783971589"
+    cmd = (
+        [YTDLP_BIN]
+        + cookie_args
+        + [
+            "--skip-download",
+            "--print", "%(view_count)s",
+            "--no-warnings",
+            "--quiet",
+            test_url,
+        ]
+    )
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        raw = r.stdout.strip()
+        views = int(raw) if raw.isdigit() else 0
+        if views > 100_000:
+            return {"valid": True,  "vues_retournees": views,
+                    "message": f"✅ Cookies valides — {views:,} vues retournées (vidéo test)"}
+        elif views > 0:
+            return {"valid": False, "vues_retournees": views,
+                    "message": f"⚠️ Cookies suspects — {views:,} vues (attendu >100k) — peut-être expirés"}
+        else:
+            return {"valid": False, "vues_retournees": 0,
+                    "message": "❌ Impossible de récupérer les stats — cookies invalides ou TikTok bloqué"}
+    except Exception as e:
+        return {"valid": False, "vues_retournees": 0, "message": "Erreur validation: " + str(e)}
 
 
 def _find_bin(name: str) -> str:

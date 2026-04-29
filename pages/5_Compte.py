@@ -42,6 +42,8 @@ st.markdown("""
 from modules.analyzer import (
     YTDLP_BIN, FFMPEG_BIN, FFPROBE_BIN, _ensure_dirs,
     VOLUME_PATH, SCREENSHOTS_PATH, IS_RAILWAY, get_ytdlp_cookie_args,
+    get_cookies_status, validate_tiktok_cookies_live, reset_cookie_cache,
+    COOKIES_FILE,
 )
 from modules.database import get_session, get_all_videos_with_stats, get_precision_level
 
@@ -220,6 +222,13 @@ def sort_videos_by_mode(videos: list, mode: str, n: int) -> list:
         for v in bot:
             v["_mode_pires"] = True
         return top + bot
+
+    elif mode == "recentes":
+        # Tri par date de publication (plus récentes d'abord) — ne dépend pas des stats
+        def _parse_date(v):
+            d = v.get("date", "") or ""
+            return d if len(d) == 8 else "00000000"
+        return sorted(videos, key=_parse_date, reverse=True)[:n]
 
     return videos[:n]
 
@@ -405,16 +414,111 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ─── Statut cookies ───────────────────────────────────────────────────────────
-_has_cookies_b64 = bool(os.getenv("TIKTOK_COOKIES_B64", "").strip())
-if IS_RAILWAY and not _has_cookies_b64:
-    st.warning(
-        "⚠️ **Railway sans cookies TikTok** — exporte `cookies.txt` (extension *Get cookies.txt LOCALLY*), "
-        "encode en base64 et ajoute `TIKTOK_COOKIES_B64` dans les variables Railway.",
-        icon="🍪",
+# ─── Statut cookies TikTok ────────────────────────────────────────────────────
+_cookie_status = get_cookies_status()
+_ck_ok      = _cookie_status["status"] == "ok"
+_ck_suspect = _cookie_status["status"] == "suspect"
+_ck_missing = _cookie_status["status"] == "missing"
+
+if _ck_ok:
+    _ck_col, _ck_btn_col = st.columns([4, 1])
+    with _ck_col:
+        st.markdown(
+            '<div style="background:#001a0a;border:1px solid #00C853;border-radius:8px;'
+            'padding:0.5rem 1rem;font-size:0.85em;">'
+            '✅ <strong style="color:#00C853;">Cookies TikTok configurés</strong>'
+            ' — stats complètes activées'
+            '<br><span style="color:#555;font-size:0.78em;">'
+            + _cookie_status.get("source", "") + ' · ' + _cookie_status.get("details", "")
+            + '</span></div>',
+            unsafe_allow_html=True
+        )
+    with _ck_btn_col:
+        if st.button("🔬 Tester", key="test_cookies_btn", use_container_width=True,
+                     help="Vérifie les cookies en interrogeant une vidéo test"):
+            with st.spinner("Test en cours (~15s)..."):
+                _vr = validate_tiktok_cookies_live(get_ytdlp_cookie_args())
+            if _vr["valid"]:
+                st.success(_vr["message"])
+            else:
+                st.warning(_vr["message"])
+
+elif _ck_suspect:
+    st.markdown(
+        '<div style="background:#1a0f00;border:1px solid #FF9800;border-radius:8px;'
+        'padding:0.5rem 1rem;font-size:0.85em;margin-bottom:0.5rem;">'
+        '⚠️ <strong style="color:#FF9800;">Cookies TikTok suspects</strong>'
+        ' — les stats peuvent être incorrectes<br>'
+        '<span style="color:#888;font-size:0.78em;">'
+        + _cookie_status.get("details", "") + '</span></div>',
+        unsafe_allow_html=True
     )
-elif IS_RAILWAY and _has_cookies_b64:
-    st.success("🍪 Cookies TikTok configurés.", icon="✅")
+else:  # missing
+    st.markdown(
+        '<div style="background:#1a0000;border:1px solid #F44336;border-radius:8px;'
+        'padding:0.5rem 1rem;font-size:0.85em;margin-bottom:0.5rem;">'
+        '❌ <strong style="color:#F44336;">Cookies TikTok non configurés</strong>'
+        ' — les vues/likes seront incorrects (ex: 345 au lieu de 2,2M)'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+# ── Section upload cookies (expander) ────────────────────────────────────────
+with st.expander("🍪 Configurer les cookies TikTok" + (" ← requis pour stats exactes" if not _ck_ok else " (déjà configurés)"),
+                 expanded=_ck_missing):
+    st.markdown("""
+**Pourquoi ?** TikTok retourne des stats fausses aux requêtes non authentifiées.
+Avec tes cookies : les vraies vues, likes, et engagement.
+
+**En 3 étapes :**
+
+1. Installe l'extension Chrome [**Get cookies.txt LOCALLY**](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc)
+2. Connecte-toi sur **[tiktok.com](https://tiktok.com)** avec ton compte
+3. Clique sur l'extension → **Export As** → **cookies.txt** (format Netscape)
+""")
+
+    col_up, col_info = st.columns([2, 1])
+    with col_up:
+        uploaded_cookies = st.file_uploader(
+            "📁 Uploader tiktok_cookies.txt (format Netscape)",
+            type=["txt"],
+            key="cookies_upload",
+            help="Le fichier exporté par l'extension 'Get cookies.txt LOCALLY'"
+        )
+        if uploaded_cookies is not None:
+            _content = uploaded_cookies.read().decode("utf-8", errors="replace")
+            # Vérification minimale avant sauvegarde
+            if "tiktok.com" not in _content and "sessionid" not in _content:
+                st.error("❌ Ce fichier ne semble pas être des cookies TikTok valides.")
+            else:
+                try:
+                    os.makedirs(VOLUME_PATH, exist_ok=True)
+                    with open(COOKIES_FILE, "w") as _cf:
+                        _cf.write(_content)
+                    reset_cookie_cache()
+                    st.success("✅ Cookies sauvegardés ! La page va se recharger...")
+                    st.rerun()
+                except Exception as _e:
+                    st.error("Erreur sauvegarde: " + str(_e))
+
+    with col_info:
+        if _ck_ok or _ck_suspect:
+            if st.button("🗑️ Supprimer les cookies", key="del_cookies",
+                         use_container_width=True):
+                try:
+                    if os.path.exists(COOKIES_FILE):
+                        os.remove(COOKIES_FILE)
+                    reset_cookie_cache()
+                    st.success("Cookies supprimés.")
+                    st.rerun()
+                except Exception as _e:
+                    st.error(str(_e))
+
+        st.markdown("""
+<div style="font-size:0.78em;color:#666;margin-top:8px;">
+⚠️ Le fichier cookies est confidentiel — il donne accès à ton compte TikTok.<br>
+Il n'est jamais envoyé à personne et n'est pas pushé sur GitHub.
+</div>""", unsafe_allow_html=True)
 
 # ─── Section A — Input ────────────────────────────────────────────────────────
 col1, col2 = st.columns([2, 1])
@@ -475,53 +579,82 @@ MODES = {
         "emoji": "🔥",
         "label": "LES MEILLEURES",
         "desc": "Top X par vues\n→ enrichit ce qui marche",
+        "needs_stats": True,
     },
     "pires": {
         "emoji": "❌",
         "label": "LES PIRES",
         "desc": "Bottom X par vues\n→ enrichit ce qui marche pas",
+        "needs_stats": True,
     },
     "engagees": {
         "emoji": "⚡",
         "label": "LES PLUS ENGAGÉES",
         "desc": "Top X par ratio\nlikes+saves/vues\n→ qualité réelle",
+        "needs_stats": True,
     },
     "mixte": {
         "emoji": "🎯",
         "label": "SÉLECTION MIXTE",
         "desc": "X/2 meilleures\n+ X/2 pires\n→ contraste maximum",
+        "needs_stats": True,
+    },
+    "recentes": {
+        "emoji": "📅",
+        "label": "LES PLUS RÉCENTES",
+        "desc": "X dernières vidéos\npubliées\n→ sans besoin de stats",
+        "needs_stats": False,
     },
 }
+
+# Mode dégradé sans cookies : forcer "recentes" et expliquer
+if _ck_missing:
+    st.markdown("""
+    <div style="background:#1a0000;border:1px solid #F44336;border-radius:8px;
+                padding:0.7rem 1rem;margin-bottom:0.8rem;font-size:0.85em;">
+        ❌ <strong style="color:#F44336;">Modes verrouillés</strong> —
+        les modes Meilleures / Pires / Engagées / Mixte nécessitent des stats exactes.
+        <br>Configure les cookies ci-dessus pour les débloquer.
+        <br>Seul le mode <strong>📅 Les plus récentes</strong> est disponible sans cookies.
+    </div>
+    """, unsafe_allow_html=True)
+    st.session_state["selection_mode"] = "recentes"
 
 # Initialiser le mode par défaut
 if "selection_mode" not in st.session_state:
     st.session_state["selection_mode"] = "meilleures"
 
-mode_cols = st.columns(4)
+mode_cols = st.columns(5)
 for i, (mode_key, mode_info) in enumerate(MODES.items()):
     with mode_cols[i]:
+        needs_stats = mode_info.get("needs_stats", True)
+        locked = _ck_missing and needs_stats
         selected = st.session_state["selection_mode"] == mode_key
-        border_color = "#ff00a4" if selected else "#333"
-        bg_color = "#1a0010" if selected else "#0a0a0a"
+
+        border_color = "#ff00a4" if selected else ("#444" if locked else "#333")
+        bg_color     = "#1a0010" if selected else ("#0d0d0d" if locked else "#0a0a0a")
+        label_color  = "#666" if locked else "#ddd"
+
         st.markdown(
             '<div style="background:' + bg_color + ';border:2px solid ' + border_color + ';'
-            'border-radius:12px;padding:0.9rem;text-align:center;min-height:110px;">'
-            '<div style="font-size:1.5rem;">' + mode_info["emoji"] + '</div>'
-            '<div style="font-size:0.8rem;font-weight:700;color:#ddd;margin-top:4px;">'
+            'border-radius:12px;padding:0.9rem;text-align:center;min-height:120px;'
+            + ('opacity:0.45;' if locked else '') + '">'
+            '<div style="font-size:1.4rem;">' + mode_info["emoji"] + ('🔒' if locked else '') + '</div>'
+            '<div style="font-size:0.75rem;font-weight:700;color:' + label_color + ';margin-top:4px;">'
             + mode_info["label"] + '</div>'
-            '<div style="font-size:0.72rem;color:#666;margin-top:4px;white-space:pre-line;">'
+            '<div style="font-size:0.68rem;color:#555;margin-top:4px;white-space:pre-line;">'
             + mode_info["desc"] + '</div>'
             '</div>',
             unsafe_allow_html=True,
         )
         if st.button(
-            "✓ Sélectionner" if selected else "Choisir",
+            "✓ Sélectionné" if selected else ("🔒 Verrouillé" if locked else "Choisir"),
             key="mode_btn_" + mode_key,
             use_container_width=True,
             type="primary" if selected else "secondary",
+            disabled=locked,
         ):
             st.session_state["selection_mode"] = mode_key
-            # Reset preview si on change de mode
             if "compte_preview" in st.session_state:
                 del st.session_state["compte_preview"]
             st.rerun()
@@ -539,6 +672,13 @@ if selection_mode == "mixte":
     n_top = math.ceil(nb_videos / 2)
     n_bot = nb_videos // 2
     st.caption(str(n_top) + " meilleures + " + str(n_bot) + " pires = contraste maximum pour la base")
+elif selection_mode == "recentes":
+    nb_videos = st.slider(
+        "Nombre de vidéos récentes à analyser",
+        min_value=5, max_value=30, value=10, step=5,
+        key="nb_videos"
+    )
+    st.caption("📅 Les " + str(nb_videos) + " vidéos les plus récentes — ne nécessite pas de stats exactes")
 else:
     nb_videos = st.slider(
         "Nombre de vidéos à analyser",

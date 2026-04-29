@@ -2,6 +2,10 @@
 .env
 *.env
 
+# Cookies TikTok — NE JAMAIS PUSHER (contient tokens d'authentification)
+tiktok_cookies.txt
+**/tiktok_cookies.txt
+
 # Base de données locale
 *.db
 *.sqlite3
