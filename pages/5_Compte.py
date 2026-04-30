@@ -358,6 +358,8 @@ def fetch_and_store_comments(url, video_id, ytdlp_cookie_args):
     sess = get_session()
     insight_str = None
     try:
+        # Crée les objets et garde une référence directe (sess.new est vide après flush)
+        tc_objects = []
         for pos, c in enumerate(top5):
             texte = str(c.get("text", ""))[:1000]
             nb_likes = int(c.get("like_count", 0) or 0)
@@ -368,7 +370,7 @@ def fetch_and_store_comments(url, video_id, ytdlp_cookie_args):
                 position=pos + 1,
             )
             sess.add(tc_obj)
-        sess.flush()
+            tc_objects.append(tc_obj)
 
         textes_joint = "\n".join(
             str(pos + 1) + ". " + str(c.get("text", ""))[:200]
@@ -383,10 +385,9 @@ def fetch_and_store_comments(url, video_id, ytdlp_cookie_args):
         try:
             insight_text, _ = _call_claude(prompt_c, max_tokens=200)
             insight_str = insight_text.strip()
-            for tc in sess.new:
-                if isinstance(tc, TopCommentaire) and tc.video_id == video_id:
-                    tc.insight_claude = insight_str
-                    break
+            # Mise à jour directe via la référence Python (pas via sess.new qui est vide après flush)
+            if tc_objects:
+                tc_objects[0].insight_claude = insight_str
         except Exception as exc:
             logger.warning("Claude insight commentaires: " + str(exc))
 
@@ -1243,20 +1244,20 @@ if "last_compte_analysis" in st.session_state:
     # ── BLOC Sons ─────────────────────────────────────────────────────────────
     from modules.database import get_session as _gs, Video as _VidM
     _sons_data = []
-    for _a in analyses:
-        _vid_id_s = _a.get("video_id")
-        if _vid_id_s:
-            _s2 = _gs()
-            try:
-                _vo = _s2.query(_VidM).filter_by(id=_vid_id_s).first()
-                if _vo and _vo.nom_son:
+    _son_vid_ids = [_a.get("video_id") for _a in analyses if _a.get("video_id")]
+    if _son_vid_ids:
+        _s2 = _gs()
+        try:
+            _vos = _s2.query(_VidM).filter(_VidM.id.in_(_son_vid_ids)).all()
+            for _vo in _vos:
+                if _vo.nom_son:
                     _sons_data.append({
                         "son": _vo.nom_son,
                         "auteur": _vo.auteur_son or "",
                         "original": _vo.son_original,
                     })
-            finally:
-                _s2.close()
+        finally:
+            _s2.close()
 
     if _sons_data:
         st.markdown("### 🎵 Sons des vidéos analysées")

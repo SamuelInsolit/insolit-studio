@@ -359,11 +359,20 @@ if "last_analysis" in st.session_state:
         pf    = creative.get("points_forts", [])
         ppf   = creative.get("points_faibles", [])
         recos = creative.get("recommandations", [])
-        for lst in [pf, ppf, recos]:
-            pass  # Already lists from JSON
-        if isinstance(pf,    str): pf    = json.loads(pf)    if pf.startswith("[")    else [pf]
-        if isinstance(ppf,   str): ppf   = json.loads(ppf)   if ppf.startswith("[")   else [ppf]
-        if isinstance(recos, str): recos = json.loads(recos)  if recos.startswith("[") else [recos]
+        def _to_list(val):
+            """Convertit une valeur (str JSON, list, ou None) en liste proprement."""
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str) and val.strip():
+                try:
+                    parsed = json.loads(val)
+                    return parsed if isinstance(parsed, list) else [parsed]
+                except Exception:
+                    return [val]
+            return []
+        pf    = _to_list(pf)
+        ppf   = _to_list(ppf)
+        recos = _to_list(recos)
 
         col_a, col_b, col_c = st.columns(3)
         with col_a:
@@ -710,9 +719,15 @@ if "last_analysis" in st.session_state:
         plans_reproduire = creative.get("plans_a_reproduire", [])
         changements      = creative.get("ce_qui_change", [])
         if isinstance(plans_reproduire, str):
-            plans_reproduire = json.loads(plans_reproduire) if plans_reproduire.startswith("[") else [plans_reproduire]
+            try:
+                plans_reproduire = json.loads(plans_reproduire) if plans_reproduire.startswith("[") else [plans_reproduire]
+            except Exception:
+                plans_reproduire = [plans_reproduire] if plans_reproduire else []
         if isinstance(changements, str):
-            changements = json.loads(changements) if changements.startswith("[") else [changements]
+            try:
+                changements = json.loads(changements) if changements.startswith("[") else [changements]
+            except Exception:
+                changements = [changements] if changements else []
 
         col_a, col_b = st.columns(2)
         with col_a:

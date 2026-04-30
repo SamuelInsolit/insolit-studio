@@ -22,13 +22,16 @@ st.set_page_config(
 )
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
+_log_handlers = [logging.StreamHandler()]
+try:
+    _log_handlers.append(logging.FileHandler("app.log"))
+except Exception:
+    pass  # Pas de fichier log si non accessible (Railway read-only FS)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    handlers=[
-        logging.FileHandler("app.log"),
-        logging.StreamHandler(),
-    ]
+    handlers=_log_handlers,
 )
 
 # ─── Init DB ──────────────────────────────────────────────────────────────────
