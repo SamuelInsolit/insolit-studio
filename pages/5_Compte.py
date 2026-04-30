@@ -235,79 +235,98 @@ def sort_videos_by_mode(videos: list, mode: str, n: int) -> list:
 
 # ─── Rapport Claude ───────────────────────────────────────────────────────────
 
-def generate_account_report(username: str, platform: str, analyses: list) -> tuple[dict, dict]:
-    """Génère le rapport de compte via Claude Sonnet."""
-    from modules.claude_mod import _call_claude
+def _compress_analyses_for_report(analyses: list) -> str:
+    """Réduit les analyses à l'essentiel pour le rapport — évite dépassement tokens."""
+    lines = []
+    for i, a in enumerate(analyses, 1):
+        hook = (a.get("hook_texte") or "")[:60]
+        trans = (a.get("transcription") or "")[:150]
+        hook_a = a.get("hook_analyse", {})
+        ce_qui_accroche = (hook_a.get("ce_qui_accroche") or "") if isinstance(hook_a, dict) else ""
+        metriques = a.get("metriques", {})
+        nb_plans = metriques.get("nb_plans_total") if isinstance(metriques, dict) else a.get("nb_plans", "?")
+        lines.append(
+            f"{i}. [{a.get('perf_tag','?').upper()}] {(a.get('titre') or '?')[:50]}\n"
+            f"   Vues:{a.get('vues','?')} Likes:{a.get('likes','?')} Durée:{a.get('duree','?')}s Plans:{nb_plans}\n"
+            f"   Hook({a.get('hook_score','?')}/10): «{hook}»\n"
+            f"   Script: {trans}\n"
+            f"   Ce qui accroche: {ce_qui_accroche[:100]}\n"
+        )
+    return "\n".join(lines)
 
-    data_str = json.dumps(analyses, ensure_ascii=False, indent=2)
-    prompt = (
+
+def generate_account_report(username: str, platform: str, analyses: list) -> tuple[dict, dict]:
+    """Génère le rapport de compte via 2 appels Claude Haiku séparés (plus robuste, moins de troncature)."""
+    from modules.claude_mod import _call_claude, _parse_json_response, MODEL_FAST
+
+    data_str = _compress_analyses_for_report(analyses)
+    header = (
         "Tu analyses le compte @" + username + " sur " + platform
         + " pour Insolit (bons plans restaurants IDF).\n\n"
-        "DONNÉES DES " + str(len(analyses)) + " VIDÉOS ANALYSÉES :\n"
-        + data_str
-        + """
+        "DONNÉES DES " + str(len(analyses)) + " VIDÉOS (compressées) :\n"
+        + data_str + "\n\n"
+    )
 
-Génère un rapport JSON complet (sans markdown) :
+    total_usage: dict = {}
+    result1: dict = {}
+    result2: dict = {}
 
-{
-  "resume_compte": {
-    "style_visuel_dominant": "description",
-    "ton_editorial": "description",
-    "frequence_publication": "estimation",
-    "points_forts_compte": ["point1", "point2", "point3"],
-    "points_faibles_compte": ["point1", "point2"]
-  },
-  "meilleures_videos": [
-    {
-      "titre": "titre ou description",
-      "pourquoi_ca_marche": "explication précise",
-      "elements_reproductibles": ["élément1", "élément2"]
-    }
-  ],
-  "pires_videos": [
-    {
-      "titre": "titre ou description",
-      "pourquoi_ca_pas_marche": "explication",
-      "erreurs_a_eviter": ["erreur1"]
-    }
-  ],
-  "patterns_gagnants": [
-    {
-      "pattern": "description du pattern",
-      "frequence": "X sur Y vidéos",
-      "impact_estime": "description"
-    }
-  ],
-  "hooks_qui_marchent": [
-    {
-      "hook_complet": "description des 3-4 premières secondes combinant visuel + auditif + texte",
-      "visuel_hook": "ce qu'on voit exactement",
-      "auditif_hook": "ce qu'on entend exactement",
-      "texte_ecran_hook": "texte exact affiché à l'écran (ou 'aucun')",
-      "mecanique": "pourquoi ces 3-4s donnent envie de continuer",
-      "score": 8,
-      "ce_qui_manque": "ce qui pourrait rendre ce hook encore plus fort"
-    }
-  ],
-  "opportunites_insolit": [
-    "comment s'inspirer concrètement pour Insolit"
-  ],
-  "score_compte_global": 7,
-  "verdict": "Analyse directe en 3 phrases sur ce compte et son utilité pour Insolit."
-}"""
+    # ── Appel 1 (Haiku) : patterns + stats + hooks → JSON compact ────────────
+    prompt1 = (
+        header
+        + "Génère UNIQUEMENT ce JSON (sans markdown, sans texte avant/après) :\n"
+        + """{"resume_compte":{"style_visuel_dominant":"","ton_editorial":"","frequence_publication":"","points_forts_compte":[],"points_faibles_compte":[]},"patterns_gagnants":[{"pattern":"","frequence":"","impact_estime":""}],"hooks_qui_marchent":[{"hook_complet":"","visuel_hook":"","auditif_hook":"","texte_ecran_hook":"","mecanique":"","score":8,"ce_qui_manque":""}],"meilleures_videos":[{"titre":"","pourquoi_ca_marche":"","elements_reproductibles":[]}],"pires_videos":[{"titre":"","pourquoi_ca_pas_marche":"","erreurs_a_eviter":[]}],"score_compte_global":7}"""
     )
 
     try:
-        text, usage = _call_claude(prompt, max_tokens=7000)
-        from modules.claude_mod import _parse_json_response
-        parsed = _parse_json_response(text)
-        if "_error" in parsed:
-            logger.warning("Rapport JSON error: " + str(parsed.get("_error"))
-                           + " | raw[:200]: " + text[:200])
-        return parsed, usage
+        text1, usage1 = _call_claude(prompt1, max_tokens=3000, model=MODEL_FAST,
+                                      use_context=False, operation="rapport_patterns")
+        result1 = _parse_json_response(text1)
+        if "_error" in result1:
+            logger.warning("Rapport appel1 JSON error: " + str(result1.get("_error"))
+                           + " | raw[:300]: " + text1[:300])
+        total_usage = usage1
     except Exception as exc:
-        logger.error("Erreur rapport compte: " + str(exc))
-        return {"_error": str(exc)}, {}
+        logger.error("Rapport appel1 exception: " + str(exc), exc_info=True)
+        result1 = {"_error": str(exc), "_partial": True}
+
+    # ── Appel 2 (Haiku) : opportunités Insolit + verdict → texte/JSON léger ──
+    prompt2 = (
+        header
+        + "Génère UNIQUEMENT ce JSON (sans markdown, sans texte avant/après) :\n"
+        + """{"opportunites_insolit":["comment s'inspirer concrètement pour Insolit (3-5 idées)"],"verdict":"Analyse directe en 3 phrases sur ce compte et son utilité pour Insolit."}"""
+    )
+
+    try:
+        text2, usage2 = _call_claude(prompt2, max_tokens=1200, model=MODEL_FAST,
+                                      use_context=False, operation="rapport_verdict")
+        result2 = _parse_json_response(text2)
+        if "_error" in result2:
+            logger.warning("Rapport appel2 JSON error: " + str(result2.get("_error"))
+                           + " | raw[:300]: " + text2[:300])
+        # Cumule les usages
+        if usage2:
+            for k in ("input_tokens", "output_tokens"):
+                total_usage[k] = total_usage.get(k, 0) + usage2.get(k, 0)
+            total_usage["cout_estime"] = (
+                total_usage.get("cout_estime", 0) + usage2.get("cout_estime", 0)
+            )
+    except Exception as exc:
+        logger.error("Rapport appel2 exception: " + str(exc), exc_info=True)
+        result2 = {"_error_verdict": str(exc), "_partial": True}
+
+    # ── Fusion des 2 résultats ────────────────────────────────────────────────
+    merged = {**result1, **result2}
+
+    # Fallback partiel : si l'un des deux a échoué, on garde ce qui marche
+    if "_error" in result1 and "_error_verdict" in result2:
+        # Les deux ont échoué → erreur complète
+        return {"_error": result1.get("_error", "Deux appels Claude échoués")}, total_usage
+
+    if "_error" in result1 or "_error_verdict" in result2:
+        merged["_partial"] = True
+
+    return merged, total_usage
 
 
 def fetch_and_store_comments(url, video_id, ytdlp_cookie_args):
@@ -871,13 +890,35 @@ if "compte_preview" in st.session_state:
             }
             use_quick = (mode_analyse == "pires") or vid_item.get("_mode_pires", False)
 
-            # Sémaphore : max 3 analyses simultanées (rate-limits API)
-            with ANALYSIS_SEMAPHORE:
-                res = analyze_video(source=url_v, metadata=meta,
-                                    is_url=True, quick_mode=use_quick)
+            # Sémaphore + retry : max 3 analyses simultanées, 2 tentatives par vidéo
+            MAX_RETRIES = 2
+            last_error = None
+            res = None
 
-            if not res.get("success"):
-                return {"error": res.get("error", "Erreur inconnue"), "vid": vid_item}
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    with ANALYSIS_SEMAPHORE:
+                        res = analyze_video(source=url_v, metadata=meta,
+                                            is_url=True, quick_mode=use_quick)
+                    if res.get("success"):
+                        break  # Succès → sortir de la boucle retry
+                    # Erreur logique (pas d'exception) → on peut retry
+                    last_error = res.get("error", "Erreur inconnue")
+                    if attempt < MAX_RETRIES:
+                        logger.warning(f"Retry {attempt+1}/{MAX_RETRIES} pour {url_v}: {last_error}")
+                        import time as _time
+                        _time.sleep(5)
+                except Exception as exc:
+                    last_error = str(exc)
+                    if attempt < MAX_RETRIES:
+                        logger.warning(f"Exception retry {attempt+1}/{MAX_RETRIES}: {exc}")
+                        import time as _time
+                        _time.sleep(5)
+                    else:
+                        return {"error": f"[{MAX_RETRIES+1} tentatives] {last_error}", "vid": vid_item}
+
+            if res is None or not res.get("success"):
+                return {"error": last_error or "Échec analyse", "vid": vid_item}
 
             vid_id = res["video_id"]
 
@@ -952,6 +993,7 @@ if "compte_preview" in st.session_state:
 
         # ── Lancement 3 vidéos en parallèle (semaphore protège les APIs) ─────
         MAX_WORKERS = 3
+        _MAX_RETRIES = 2  # doit correspondre à MAX_RETRIES dans _analyze_one()
         status_global.markdown(
             f"**⚡ Analyse de {nb_found} vidéos — {MAX_WORKERS} en parallèle...**"
         )
@@ -1023,7 +1065,7 @@ if "compte_preview" in st.session_state:
             if errors:
                 with st.expander("Erreurs"):
                     for err in errors:
-                        st.text(err)
+                        st.markdown(f"❌ **{err}**")
             st.stop()
 
         # Rapport Claude
@@ -1059,9 +1101,9 @@ if "compte_preview" in st.session_state:
             + _saved_str
         )
         if errors:
-            with st.expander("⚠️ " + str(len(errors)) + " erreurs"):
+            with st.expander(f"⚠️ {len(errors)} vidéo(s) en échec (après {_MAX_RETRIES} tentatives)"):
                 for err in errors:
-                    st.text(err)
+                    st.markdown(f"❌ {err}")
 
         # Sauvegarde résultats + nettoyage preview
         st.session_state["last_compte_analysis"] = {

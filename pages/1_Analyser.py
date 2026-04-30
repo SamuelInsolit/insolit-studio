@@ -624,17 +624,22 @@ if "last_analysis" in st.session_state:
         # Texte continu lisible (sans timestamps) pour lecture rapide
         texte_continu = " ".join(w["mot"] for w in mots) if mots else texte_complet
 
+        # Priorité : texte corrigé par Claude si disponible
+        texte_affiche = whisper.get("texte_corrige") or texte_continu
+
         tab_lire, tab_timestamps = st.tabs(["📖 Lire le script", "⏱ Avec timestamps"])
 
         with tab_lire:
             st.text_area(
                 meta_label,
-                texte_continu,
+                texte_affiche,
                 height=220,
                 key="transcript_continu"
             )
+            if whisper.get("texte_corrige") and whisper.get("texte_corrige") != whisper.get("texte_complet"):
+                st.caption("✨ Transcription post-corrigée par Claude (argot IDF)")
             if st.button("📋 Copier", key="copy_script_continu"):
-                st.code(texte_continu)
+                st.code(texte_affiche)
 
         with tab_timestamps:
             st.text_area(

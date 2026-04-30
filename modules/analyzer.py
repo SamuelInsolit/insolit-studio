@@ -613,6 +613,19 @@ def analyze_video(
         metriques  = pegasus_data.get("metriques_globales", {})
         hook       = pegasus_data.get("hook_analyse", {})
 
+        # Post-correction Whisper (Claude Haiku, ~$0.001/vidéo)
+        texte_brut = whisper_result.get("texte_complet", "")
+        texte_corrige = texte_brut  # default = brut si correction échoue
+        if texte_brut and len(texte_brut) > 10:
+            try:
+                from modules.whisper_mod import correct_transcription
+                texte_corrige = correct_transcription(texte_brut)
+                whisper_result["texte_corrige"] = texte_corrige
+                whisper_result["texte_brut"] = texte_brut
+            except Exception as _wce:
+                logger.warning(f"Post-correction Whisper échouée: {_wce}")
+                whisper_result["texte_corrige"] = texte_brut
+
         step(f"🎬 {len(plans_data)} plans | 📝 {whisper_result.get('nb_mots', 0)} mots transcrits")
 
         # ── 6. Sauvegarde DB (Vision + Whisper) ─────────────────────────────
@@ -709,6 +722,9 @@ def analyze_video(
         # Chaque frame = screenshot → ./screenshots/{video_id}/plan_XX.jpg
 
         # ── 10. Finalisation ──────────────────────────────────────────────────
+        # Sauvegarde transcription corrigée
+        if texte_corrige and texte_corrige != texte_brut:
+            video.transcription_corrigee = texte_corrige
         video.statut_analyse = "complete"
         session.commit()
 

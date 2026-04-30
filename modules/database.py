@@ -84,11 +84,12 @@ def _migrate_db(engine):
     if "videos" in inspector.get_table_names():
         existing_videos = {col["name"] for col in inspector.get_columns("videos")}
         new_cols_videos = [
-            ("type_offre",       "TEXT"),
-            ("jour_publication", "TEXT"),
-            ("nom_son",          "TEXT"),
-            ("auteur_son",       "TEXT"),
-            ("son_original",     "BOOLEAN"),
+            ("type_offre",              "TEXT"),
+            ("jour_publication",        "TEXT"),
+            ("nom_son",                 "TEXT"),
+            ("auteur_son",              "TEXT"),
+            ("son_original",            "BOOLEAN"),
+            ("transcription_corrigee",  "TEXT"),
         ]
         with engine.begin() as conn:
             for col_name, col_type in new_cols_videos:
@@ -162,6 +163,8 @@ class Video(Base):
     nom_son = Column(String(500))
     auteur_son = Column(String(200))
     son_original = Column(Boolean)
+    # Correction Whisper post-traitée par Claude Haiku
+    transcription_corrigee = Column(Text)  # texte Whisper post-corrigé par Claude Haiku
 
     analyse_pegasus = relationship("AnalysePegasus", back_populates="video", uselist=False)
     plans = relationship("Plan", back_populates="video")

@@ -192,6 +192,42 @@ def transcribe(video_path: str, progress_callback=None) -> dict:
                 "debit_parole": 0, "silences": [], "langue": "fr", "_error": str(e)}
 
 
+def correct_transcription(text: str) -> str:
+    """
+    Post-correction légère de la transcription Whisper par Claude Haiku.
+    Corrige l'argot, le verlan, les mots mal transcrits dans le contexte food/IDF.
+    Coût : ~$0.001 par vidéo avec Haiku. Retourne le texte corrigé.
+    """
+    if not text or len(text.strip()) < 10:
+        return text
+
+    try:
+        from modules.claude_mod import _call_claude, MODEL_FAST
+        prompt = (
+            "Corrige UNIQUEMENT les erreurs évidentes dans cette transcription française "
+            "issue d'une vidéo TikTok food/restaurant IDF. Le locuteur peut utiliser "
+            "de l'argot, du verlan, du créole ou des termes culinaires spécifiques.\n\n"
+            "RÈGLES ABSOLUES :\n"
+            "- Ne change PAS le sens, ne reformule pas, n'ajoute rien\n"
+            "- Corrige seulement les mots clairement mal orthographiés par Whisper\n"
+            "- Conserve l'argot intentionnel (wesh, chelou, ouf...)\n"
+            "- Si la transcription est correcte → retourne-la telle quelle\n\n"
+            f"TRANSCRIPTION BRUTE :\n{text[:800]}\n\n"
+            "Retourne UNIQUEMENT la transcription corrigée, rien d'autre."
+        )
+        corrected, _ = _call_claude(prompt, max_tokens=600, model=MODEL_FAST,
+                                     use_context=False, operation="whisper_correction")
+        corrected = corrected.strip()
+        # Sanity check : la correction ne doit pas être vide ou trop différente
+        if len(corrected) > 5 and len(corrected) < len(text) * 3:
+            logger.info(f"Correction Whisper: {len(text)} → {len(corrected)} chars")
+            return corrected
+        return text
+    except Exception as e:
+        logger.warning(f"Correction Whisper Claude échouée: {e}")
+        return text
+
+
 def format_transcript_display(words: list) -> str:
     if not words:
         return "Aucune transcription disponible."
