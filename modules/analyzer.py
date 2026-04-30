@@ -673,8 +673,9 @@ def analyze_video(
 
         # ── 8. Analyse créative Claude (avec les vraies images = plus précis) ─────
         step("🧠 Analyse créative (Claude Haiku + images réelles)...")
-        # On envoie les frames déjà en mémoire (max 5 pour équilibre coût/qualité)
-        frames_for_creative = frames[:5] if frames else []
+        # Frames envoyées à analyze_creative seulement en mode complet (quick_mode=False)
+        # En mode rapide ou analyse de compte → texte seul (Haiku, moins cher)
+        frames_for_creative = (frames[:5] if frames else []) if not quick_mode else []
         creative_data, claude_usage = analyze_creative(
             pegasus_data, whisper_result, similar_videos,
             frames=frames_for_creative

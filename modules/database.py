@@ -132,6 +132,9 @@ def _migrate_db(engine):
                     except Exception as e:
                         logger.warning("Migration stats." + col_name + ": " + str(e))
 
+    # Migration table api_costs — créée automatiquement par create_all si nouvelle
+    # Pas besoin d'ALTER TABLE car c'est une nouvelle table
+
 
 # ─── Modèles ────────────────────────────────────────────────────────────────
 
@@ -324,6 +327,22 @@ class Brief(Base):
     suggestions = Column(Text)
     base_sur_videos_ids = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ApiCost(Base):
+    """Tracking des coûts API Claude — chaque appel loggé."""
+    __tablename__ = "api_costs"
+
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    operation = Column(String(100))   # vision|creative|brief|account_report|patterns|compare_kb
+    model = Column(String(100))       # claude-haiku-4-5|claude-sonnet-4-5
+    input_tokens = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+    cache_write_tokens = Column(Integer, default=0)
+    cache_read_tokens = Column(Integer, default=0)
+    cout_usd = Column(Float, default=0.0)
+    video_id = Column(Integer, nullable=True)
 
 
 class Ressource(Base):
@@ -700,6 +719,90 @@ def get_video_analysis_from_db(video_id: int) -> dict:
             "elapsed":      0,
             "cout_total":   0,
         }
+    finally:
+        session.close()
+
+
+def log_api_cost(operation: str, model: str, input_tokens: int, output_tokens: int,
+                 cout_usd: float, video_id: int = None,
+                 cache_write: int = 0, cache_read: int = 0):
+    """Sauvegarde le coût d'un appel API Claude."""
+    session = get_session()
+    try:
+        cost_entry = ApiCost(
+            operation=operation,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_write_tokens=cache_write,
+            cache_read_tokens=cache_read,
+            cout_usd=cout_usd,
+            video_id=video_id,
+        )
+        session.add(cost_entry)
+        session.commit()
+    except Exception as e:
+        session.rollback()
+        logger.warning("log_api_cost: " + str(e))
+    finally:
+        session.close()
+
+
+def get_costs_summary() -> dict:
+    """Résumé des coûts API pour le dashboard."""
+    from sqlalchemy import func
+    from datetime import datetime, timedelta
+    session = get_session()
+    try:
+        now = datetime.utcnow()
+        start_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        total_month = session.query(func.sum(ApiCost.cout_usd)).filter(
+            ApiCost.timestamp >= start_month).scalar() or 0.0
+
+        total_today = session.query(func.sum(ApiCost.cout_usd)).filter(
+            ApiCost.timestamp >= start_today).scalar() or 0.0
+
+        # Par opération ce mois
+        rows = session.query(
+            ApiCost.operation,
+            func.sum(ApiCost.cout_usd),
+            func.count(ApiCost.id),
+        ).filter(ApiCost.timestamp >= start_month).group_by(ApiCost.operation).all()
+
+        by_operation = {r[0]: {"cout": round(r[1], 4), "nb": r[2]} for r in rows}
+
+        # Nombre total d'analyses ce mois
+        nb_analyses = session.query(func.count(ApiCost.id)).filter(
+            ApiCost.timestamp >= start_month,
+            ApiCost.operation == "vision"
+        ).scalar() or 0
+
+        # Projection fin de mois
+        days_in_month = 30
+        day_of_month = now.day
+        projection = (total_month / day_of_month * days_in_month) if day_of_month > 0 else 0
+
+        return {
+            "total_month": round(total_month, 4),
+            "total_today": round(total_today, 4),
+            "by_operation": by_operation,
+            "nb_analyses_month": nb_analyses,
+            "projection_month": round(projection, 2),
+        }
+    except Exception as e:
+        logger.warning("get_costs_summary: " + str(e))
+        return {"total_month": 0.0, "total_today": 0.0, "by_operation": {}, "nb_analyses_month": 0, "projection_month": 0.0}
+    finally:
+        session.close()
+
+
+def has_creative_analysis(video_id: int) -> bool:
+    """Vérifie si une analyse créative existe déjà en base pour cette vidéo."""
+    session = get_session()
+    try:
+        return session.query(AnalyseCreative).filter_by(video_id=video_id).first() is not None
     finally:
         session.close()
 

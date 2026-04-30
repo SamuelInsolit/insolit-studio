@@ -175,6 +175,28 @@ with st.sidebar:
         st.caption("Base de données non initialisée")
 
     st.divider()
+    try:
+        from modules.database import get_costs_summary
+        _costs = get_costs_summary()
+        _month = _costs.get("total_month", 0)
+        _today = _costs.get("total_today", 0)
+        _proj  = _costs.get("projection_month", 0)
+        _color = "#F44336" if _month > 20 else ("#FF9800" if _month > 10 else "#00C853")
+        st.markdown(
+            f'<div style="font-size:0.72rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:2px;margin-bottom:4px;">Coûts API</div>'
+            f'<div style="background:#0a0a0a;border:1px solid {_color};border-radius:8px;padding:0.5rem 0.8rem;font-size:0.82em;">'
+            f'<span style="color:{_color};font-weight:700;">💰 ${_month:.3f}</span>'
+            f'<span style="color:#555;font-size:0.75em;"> ce mois</span><br>'
+            f'<span style="color:#666;font-size:0.75em;">Aujourd\'hui : ${_today:.4f} · Projection : ${_proj:.2f}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+        if _month > 10:
+            st.warning(f"⚠️ Budget API : ${_month:.2f}/mois", icon="💸")
+    except Exception:
+        pass
+
+    st.divider()
 
     st.markdown('<div style="font-size:0.72rem;font-weight:700;color:#555;text-transform:uppercase;letter-spacing:2px;margin-bottom:4px;">Principal</div>', unsafe_allow_html=True)
     st.page_link("pages/1_Analyser.py",            label="🎬 Analyseur")
@@ -497,6 +519,49 @@ if data:
             ✅ Base solide — tes briefs sont maintenant basés sur <strong>{nb} patterns réels</strong>
         </div>
         """, unsafe_allow_html=True)
+
+    # ─── ROW 3b — Coûts API ───────────────────────────────────────────────────
+    try:
+        from modules.database import get_costs_summary
+        _cs = get_costs_summary()
+        if _cs["total_month"] > 0:
+            st.markdown('<div class="section-title">Coûts API Claude</div>', unsafe_allow_html=True)
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            with _c1:
+                st.markdown(f"""<div class="kpi-card">
+                    <div class="kpi-icon">💰</div>
+                    <div class="kpi-label">Ce mois</div>
+                    <div class="kpi-value" style="font-size:1.8rem;">${_cs['total_month']:.3f}</div>
+                    <div class="kpi-sub">projection : ${_cs['projection_month']:.2f}</div>
+                </div>""", unsafe_allow_html=True)
+            with _c2:
+                _nb = _cs.get("nb_analyses_month", 0)
+                _avg = round(_cs["total_month"] / _nb, 4) if _nb > 0 else 0
+                st.markdown(f"""<div class="kpi-card">
+                    <div class="kpi-icon">🎬</div>
+                    <div class="kpi-label">Analyses Vision</div>
+                    <div class="kpi-value" style="font-size:1.8rem;">{_nb}</div>
+                    <div class="kpi-sub">~${_avg:.4f} / analyse</div>
+                </div>""", unsafe_allow_html=True)
+            with _c3:
+                _briefs = _cs.get("by_operation", {}).get("brief_generation", {})
+                st.markdown(f"""<div class="kpi-card">
+                    <div class="kpi-icon">⚡</div>
+                    <div class="kpi-label">Briefs générés</div>
+                    <div class="kpi-value" style="font-size:1.8rem;">{_briefs.get('nb', 0)}</div>
+                    <div class="kpi-sub">${_briefs.get('cout', 0):.3f} total</div>
+                </div>""", unsafe_allow_html=True)
+            with _c4:
+                _today = _cs.get("total_today", 0)
+                _color = "#F44336" if _today > 2 else ("#FF9800" if _today > 1 else "#01f0fc")
+                st.markdown(f"""<div class="kpi-card">
+                    <div class="kpi-icon">📅</div>
+                    <div class="kpi-label">Aujourd'hui</div>
+                    <div class="kpi-value" style="font-size:1.8rem;color:{_color};">${_today:.4f}</div>
+                    <div class="kpi-sub">budget seuil : $2/jour</div>
+                </div>""", unsafe_allow_html=True)
+    except Exception:
+        pass
 
     # ─── ROW 4 — Raccourcis rapides ───────────────────────────────────────────
     st.markdown('<div class="section-title">Raccourcis</div>', unsafe_allow_html=True)

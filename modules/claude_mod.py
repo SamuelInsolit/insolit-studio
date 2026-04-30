@@ -19,6 +19,16 @@ PRICES = {
     MODEL_SMART: {"in": 3.0,   "out": 15.0, "cache_write": 3.0,   "cache_read": 0.30},
 }
 
+def get_model(task_type: str) -> str:
+    """
+    Routing Haiku/Sonnet selon la tâche.
+    Haiku = 15x moins cher, suffisant pour classification/matching/structuration.
+    Sonnet = qualité maximale pour création (briefs, analyses créatives complexes).
+    """
+    _SONNET_TASKS = {"brief_generation", "full_analysis"}
+    return MODEL_SMART if task_type in _SONNET_TASKS else MODEL_FAST
+
+
 # ── Contexte statique Insolit (mis en cache → -90% coût après 1er appel) ─────
 _CONTEXT_PATH = _ROOT / "context_insolit.md"
 _INSOLIT_CONTEXT: str | None = None
@@ -48,6 +58,7 @@ def _call_claude(
     max_tokens: int = 2048,
     model: str = MODEL_FAST,
     use_context: bool = True,        # Injecte context_insolit.md avec cache
+    operation: str = "unknown",
 ) -> tuple[str, dict]:
     """
     Appelle Claude et retourne (texte, usage).
@@ -115,6 +126,21 @@ def _call_claude(
     }
     if cache_read:
         logger.info(f"Cache hit! {cache_read} tokens lus du cache (-90% coût)")
+
+    # Log asynchrone — ne bloque pas si DB indisponible
+    try:
+        from modules.database import log_api_cost
+        log_api_cost(
+            operation=operation,
+            model=model,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            cout_usd=cost,
+            cache_write=cache_write,
+            cache_read=cache_read,
+        )
+    except Exception:
+        pass
 
     return text, usage
 
@@ -273,6 +299,12 @@ def analyze_frames_with_vision(
             logger.info(f"Vision cache hit! {cache_read} tokens lus du cache")
         logger.info(f"Vision (Haiku): {in_tok}in/{out_tok}out = ${cost:.5f}")
 
+        try:
+            from modules.database import log_api_cost
+            log_api_cost("vision", MODEL_FAST, in_tok, out_tok, cost, cache_write=cache_write, cache_read=cache_read)
+        except Exception:
+            pass
+
         parsed = _parse_pegasus_response(raw_text)
         return parsed, usage
 
@@ -410,13 +442,20 @@ def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: lis
                 "vision_reelle": True,
             }
             logger.info(f"Analyse créative multimodale ({len(key_frames)} images): ${cost:.5f}")
+
+            try:
+                from modules.database import log_api_cost
+                log_api_cost("creative", MODEL_FAST, in_tok, out_tok, cost, cache_write=cache_write, cache_read=cache_read)
+            except Exception:
+                pass
+
             parsed = _parse_json_response(raw)
             parsed["_vision_reelle"] = True
             return parsed, usage
 
         # ── Mode texte seul (fallback si pas de frames) ───────────────────────
         prompt = "Expert TikTok food IDF. Réponds UNIQUEMENT avec ce JSON valide (sans markdown).\n\n" + _data_block
-        text, usage = _call_claude(prompt, max_tokens=2000, model=MODEL_FAST)
+        text, usage = _call_claude(prompt, max_tokens=2000, model=MODEL_FAST, operation="creative")
         parsed = _parse_json_response(text)
         logger.info(f"Analyse créative (Haiku texte): ${usage.get('cout_estime',0):.5f}")
         return parsed, usage
@@ -424,6 +463,78 @@ def analyze_creative(pegasus_data: dict, whisper_data: dict, similar_videos: lis
     except Exception as e:
         logger.error(f"Erreur analyse Claude: {e}")
         return {"_error": str(e)}, {}
+
+
+def _compress_kb_for_brief(full_context: dict, categorie: str = "", type_offre: str = "",
+                            max_scripts: int = 10, max_hooks: int = 6) -> str:
+    """
+    Compresse le contexte KB pour generate_brief.
+    - Filtre par catégorie si possible
+    - Tronque les scripts à 150 chars (hook + pourquoi)
+    - Limite à max_scripts viraux + max_hooks
+    Résultat : ~2000 tokens au lieu de 8000-15000.
+    """
+    if not full_context:
+        return ""
+
+    parts = []
+
+    # 1. Hooks compressés (50 chars max chacun)
+    hooks = full_context.get("hooks_performants", [])
+    if hooks:
+        best = sorted(hooks,
+                      key=lambda h: (0 if h.get("performance") == "viral" else 1,
+                                     -(h.get("vues") or 0)))[:max_hooks]
+        lines = []
+        for h in best:
+            perf = h.get("performance", "").upper()
+            hook_txt = (h.get("hook") or "")[:60]
+            why = (" — " + (h.get("ce_qui_marche") or "")[:50]) if h.get("ce_qui_marche") else ""
+            lines.append(f"  [{perf}] «{hook_txt}»{why}")
+        parts.append("HOOKS PROUVÉS:\n" + "\n".join(lines))
+
+    # 2. Scripts viraux compressés (hook + pourquoi seulement, 150 chars max)
+    scripts = full_context.get("scripts_viraux", [])
+    # Filtre catégorie si dispo
+    if categorie:
+        cat_lower = categorie.lower()
+        filtered = [s for s in scripts if cat_lower in (s.get("titre") or "").lower()
+                    or cat_lower in (s.get("contenu") or "").lower()]
+        if filtered:
+            scripts = filtered
+    scripts = scripts[:max_scripts]
+    if scripts:
+        lines = []
+        for s in scripts:
+            hook = (s.get("hook_texte") or "")[:60]
+            why = (s.get("ce_qui_marche") or "")[:80]
+            repro = (s.get("a_reproduire") or "")[:60]
+            vues = str(s.get("vues") or 0)
+            lines.append(f"  [{vues}v] HOOK: «{hook}» | WHY: {why} | REPRO: {repro}")
+        parts.append("SCRIPTS VIRAUX (compressés):\n" + "\n".join(lines))
+
+    # 3. Patterns
+    patterns = full_context.get("patterns_gagnants", [])[:5]
+    if patterns:
+        lines = ["  - " + (p.get("titre") or "") + ": " + (p.get("contenu") or "")[:100]
+                 for p in patterns]
+        parts.append("PATTERNS:\n" + "\n".join(lines))
+
+    # 4. Résumé statistique (200 tokens au lieu de toute la KB)
+    stats = full_context.get("stats_agregees", {})
+    timing = full_context.get("timing_optimal", {})
+    visuels = full_context.get("caracteristiques_visuelles_virales", {})
+    summary_lines = []
+    if stats.get("nb_videos_annotees"):
+        summary_lines.append(f"Base: {stats['nb_videos_annotees']} vidéos annotées, {stats.get('nb_viral',0)} virales")
+    if timing.get("meilleur_jour"):
+        summary_lines.append(f"Meilleur jour: {timing['meilleur_jour']} ({timing.get('vues_moyennes_meilleur_jour',0):,}v moy.)")
+    if visuels.get("plan_1_type_dominant"):
+        summary_lines.append(f"Plan 1 viral: {visuels['plan_1_type_dominant']}, visage<5s: {visuels.get('presence_visage_5s',0)*100:.0f}%")
+    if summary_lines:
+        parts.append("STATS KB:\n" + "\n".join("  " + l for l in summary_lines))
+
+    return "\n\n".join(parts)
 
 
 def generate_brief(
@@ -445,59 +556,17 @@ def generate_brief(
     """
     best_str = json.dumps(best_videos[:5], ensure_ascii=False, indent=2) if best_videos else "[]"
 
-    # ── Contexte KB enrichi ────────────────────────────────────────────────────
+    # ── Contexte KB enrichi (compressé pour économiser ~6000 tokens) ──────────
     kb_section = ""
     ctx = full_context or {}
 
     if ctx:
-        kb_parts = []
-        stats_agg = ctx.get("stats_agregees", {})
-
-        # 1. Hooks prouvés
-        hooks_kb = ctx.get("hooks_performants", [])
-        if hooks_kb:
-            best_hooks = sorted(
-                hooks_kb,
-                key=lambda h: (0 if h.get("performance") == "viral" else 1, -(h.get("vues") or 0))
-            )[:8]
-            hook_lines = []
-            for h in best_hooks:
-                perf = ("[" + h["performance"].upper() + "]") if h.get("performance") else ""
-                vues = (" " + str(h["vues"]) + " vues") if h.get("vues") else ""
-                ce_qui = (" — " + h["ce_qui_marche"][:80]) if h.get("ce_qui_marche") else ""
-                hook_lines.append("  * " + chr(171) + h["hook"] + chr(187) + " " + perf + vues + ce_qui)
-            kb_parts.append("HOOKS QUI ONT PROUVE LEUR EFFICACITE:\n" + "\n".join(hook_lines))
-
-        # 2. Scripts viraux complets
-        scripts_viraux = ctx.get("scripts_viraux", [])
-        if scripts_viraux:
-            sv_lines = []
-            for r in scripts_viraux[:4]:
-                vues_str = (str(r["vues"]) + " vues") if r.get("vues") else ""
-                likes_str = (str(r["nb_likes"]) + " likes") if r.get("nb_likes") else ""
-                saves_str = (str(r["nb_enregistrements"]) + " saves") if r.get("nb_enregistrements") else ""
-                stats_str = " / ".join(s for s in [vues_str, likes_str, saves_str] if s)
-                sv_lines.append(
-                    "[VIRAL" + (" " + stats_str if stats_str else "") + "] " + (r.get("titre") or "") + "\n"
-                    "HOOK: " + chr(171) + (r.get("hook_texte") or "") + chr(187) + "\n"
-                    "POURQUOI: " + (r.get("ce_qui_marche") or "") + "\n"
-                    "A REPRODUIRE: " + (r.get("a_reproduire") or "") + "\n"
-                    "SCRIPT: " + (r.get("contenu") or "")[:600]
-                )
-            kb_parts.append("SCRIPTS VIRAUX (adapter pour ce partenaire):\n" + "\n---\n".join(sv_lines))
-
-        # 3. Patterns gagnants
-        patterns_kb = ctx.get("patterns_gagnants", [])
-        if patterns_kb:
-            p_lines = ["  - " + (p.get("titre") or "") + ": " + (p.get("contenu") or "")[:150]
-                       for p in patterns_kb[:5]]
-            kb_parts.append("PATTERNS GAGNANTS:\n" + "\n".join(p_lines))
-
-        if kb_parts:
+        compressed = _compress_kb_for_brief(ctx, categorie="", max_scripts=10, max_hooks=6)
+        if compressed:
+            stats_agg = ctx.get("stats_agregees", {})
             nb_r = stats_agg.get("nb_ressources_kb", 0)
             nb_v = stats_agg.get("nb_videos_annotees", 0)
-            footer = "\n[Base: " + str(nb_r) + " ressources KB + " + str(nb_v) + " videos annotees]"
-            kb_section = "\n\nBASE DE CONNAISSANCES INSOLIT:\n" + "\n\n".join(kb_parts) + footer
+            kb_section = "\n\nBASE DE CONNAISSANCES INSOLIT:\n" + compressed + f"\n[Base: {nb_r} ressources + {nb_v} vidéos]"
 
     elif knowledge_base:
         # Fallback ancien format
@@ -550,7 +619,7 @@ def generate_brief(
     )
 
     try:
-        text, usage = _call_claude(prompt, max_tokens=4096, model=MODEL_SMART)
+        text, usage = _call_claude(prompt, max_tokens=4096, model=MODEL_SMART, operation="brief_generation")
         parsed = _parse_json_response(text)
         logger.info(f"Brief (Sonnet): coût={usage['cout_estime']}$")
         return parsed, usage
@@ -590,7 +659,7 @@ Rapport de patterns actionnable en français, format markdown:
 [1 seule chose à changer maintenant]"""
 
     try:
-        text, usage = _call_claude(prompt, max_tokens=1500, model=MODEL_FAST)
+        text, usage = _call_claude(prompt, max_tokens=1500, model=MODEL_FAST, operation="patterns")
         return text, usage
     except Exception as e:
         logger.error(f"Erreur rapport patterns: {e}")
@@ -630,7 +699,7 @@ RESSOURCE BASE DE CONNAISSANCES [{perf_label} | {vues_str}]:
 {{"points_communs": ["similarité 1 (1 phrase max)", "similarité 2"], "differences": ["différence 1 (1 phrase max)", "différence 2"], "conseil_cle": "1 action concrète pour s'aligner sur la ressource performante"}}"""
 
     try:
-        text, usage = _call_claude(prompt, max_tokens=300, model=MODEL_FAST, use_context=False)
+        text, usage = _call_claude(prompt, max_tokens=300, model=MODEL_FAST, use_context=False, operation="compare_kb")
         result = _parse_json_response(text)
         return result
     except Exception as e:
